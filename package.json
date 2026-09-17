@@ -1,0 +1,20 @@
+{
+  "name": "perry-wasm-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "perry (typerry) 把 TypeScript 编译成 wasm, 在 WAMR 运行时中执行",
+  "type": "module",
+  "scripts": {
+    "demo": "./demo.sh",
+    "build:wasm": "node tools/build-wasm.mjs"
+  },
+  "dependencies": {
+    "@typerry/node": "0.0.2"
+  },
+  "optionalDependencies": {
+    "@typerry/node-linux-x64-gnu": "0.0.2"
+  },
+  "devDependencies": {
+    "binaryen": "^123.0.0"
+  }
+}

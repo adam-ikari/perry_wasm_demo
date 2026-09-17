@@ -1,0 +1,9 @@
+# 运行时模块自己带线性内存 (合并后业务模块 import 它), data/bss/stack 放在 2 MiB 以上,
+# 避免与业务模块在 0 附近的 data 段、以及向下生长的栈重叠。
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C", "link-arg=--global-base=2097152",
+  "-C", "link-arg=--initial-memory=4194304",
+  "-C", "link-arg=--no-entry",
+  "-C", "link-arg=--export-dynamic",
+]

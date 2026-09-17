@@ -1,0 +1,17 @@
+[package]
+name = "perry-rt-wasm"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "perry 的 rt.* 运行时, 用 Rust 写成并编译成 wasm 模块 (与业务模块共享线性内存)"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+codegen-units = 1
+strip = true
