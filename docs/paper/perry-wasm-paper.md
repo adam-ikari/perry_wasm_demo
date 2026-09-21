@@ -13,7 +13,7 @@ A Systematic Exploration from Runtime Modularization through Performance Attribu
 
 ## 中文摘要
 
-TypeScript 的交付长期等同于交付源码：打包与压缩只增加阅读成本，不改变语义可读性。编译成原生二进制能解决源码外流，却把"一次编写、到处运行"换成"一次编写、到处编译"，交叉编译矩阵随平台数量增长。WebAssembly 提供了第三条路。本文记录一次完整的技术探索：把 perry 编译器产出的 TypeScript→wasm 模块跑在**没有任何 JavaScript 引擎**的宿主上，宿主只保留 WASI 的 `fd_write`。
+TypeScript 程序的分发和交付长期等同于交付源码：打包与压缩只增加阅读成本，不改变语义可读性。编译成原生二进制能解决源码外流，却把"一次编写、到处运行"换成"一次编写、到处编译"，交叉编译矩阵随平台数量增长。WebAssembly 提供了第三条路。本文记录一次完整的技术探索：把 perry 编译器产出的 TypeScript→wasm 模块跑在**没有任何 JavaScript 引擎**的宿主上，宿主只保留 WASI 的 `fd_write`。
 
 探索分三段。第一段先解决"能不能跑"：把 perry 的 Rust 运行时以 `#![no_std]` 编译成独立的 wasm 模块，与业务模块由 WAMR 多模块机制链接，业务模块的 211 个 `rt.*` 导入全部由该模块提供，其中 13 个真实实现、198 个编译期生成的报错桩；正负向用例 6/6 通过，输出与 perry 自带 JS 宿主层逐字节一致。第二段再解决"慢在哪里"：用同一份 `src/bench.ts`（fib(29) 加 10⁶ 次循环）建立六路对照，把总倍数按**乘性因子**分解为「引擎因子 × codegen 因子」并做闭合校验（误差 <5%），用手写"干净对照 wasm"隔离引擎，用 V8 的 TurboFan 稳态与 QuickJS 旁证交叉验证。结论不在引擎一侧：干净 wasm 在 WAMR AOT 下与手写 C 同速（0.97×），根因是 perry wasm codegen 的类型擦除——`+` 与条件判定被强制过桥，桥函数体占 AOT 路耗时的 95.8%。第三段据此回到"怎么修、修到多少"：先做零上游依赖的 wat 后处理 pass（4 程序 × 7 变体共 28 次逐字节一致、0 误判、bench 快 7.3×），再直接修改上游 `perry-codegen-wasm` 的发射点，结果是 **122.112 ms → 3.891 ms（快 31.4×）**，跨过等价手工特化的上界 17.185 ms，逼近全去盒的 3.325 ms。
 
