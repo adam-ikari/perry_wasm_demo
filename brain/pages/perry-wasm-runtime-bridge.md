@@ -5,7 +5,7 @@ category: concept
 status: active
 tags: [perry, wasm, wamr, abi]
 created: "2026-09-15T05:11:48"
-updated: "2026-09-17T00:00:00"
+updated: "2026-09-21T03:23:54"
 ---
 
 <!-- compiled_truth -->
@@ -47,6 +47,19 @@ perry 的 wasm 后端产出的模块声明 211 个 `rt.*` 导入，把"运行时
 211 个导入只用到 16 种类型，绝大多数是 `(i64…)->i64` 形态；`string_len` = `(i64)->i64`，`string_concat` = `(i64,i64)->i64`，`console_log` = `(i64)->()`，`string_new` = `(i32,i32)->()`。
 `mem_call(nameId, argc, base)`：nameId 是桥接函数名在字符串表里的下标，参数以 u64 槽位写在线性内存 `base`，结果写回 `base`；`mem_call_i32` 结果直接 i32 返回。字符串表按启动时的 `rt.string_new` 调用顺序 append，下标即 id——错位则字符串全废。
 
+## WAMR AOT 事实（2026-09-19 实测）
+
+- **AOT 文件格式不支持 import memory**：`core/iwasm/compilation/aot_emit_aot_file.c` 硬编码 `import_memory_count = 0`（TODO 注释），加载时 `aot_validator.c` 直接拒绝（"import memory is not supported"）。因此双模块结构（业务模块 import rt.memory）**无法整体 AOT**：app.aot + rt.aot 运行即 "out of bounds memory access"。
+- **可行方案**：用 binaryen 的 `wasm-merge` 把 app+rt 合并成单模块再 `wamrc`。系统 LLVM 14 即可构建 wamrc，无需自编全量 LLVM。合并后需后处理（`tools/attribution/patch_merged.mjs`）：删 rt 侧 `__data_end`/`__heap_base` 导出（与 app 栈指针组合成非法 aux stack）+ 织入 `_start` wrapper 先调 `_initialize`。
+- **性能结论**：干净 wasm × WAMR AOT 与原生 gcc -O2 同速（E' 1.362 ms = 0.97× 原生，解释器 35× 引擎因子归零）；perry wasm × AOT E 146.829 ms = 原生的 104×，剩余差距几乎全是 perry codegen 桥调用形态。
+- **perry 两条后端差距**（perry wasm vs perry 原生）：解释器下 393× → AOT 下 23×。
+## 性能根因与修复路径（2026-09-21）
+
+- **根因裁定（100%）**：perry wasm 慢的根因在 `perry-codegen-wasm` 的类型擦除桥形态，与引擎/优化器无关——干净 wasm × WAMR AOT 与原生 gcc -O2 同速（E' 1.362 ms = 0.97× 原生）；perry wasm × AOT E 146.829 ms = 原生 104×；nohost 隔离实验证明调用图形态本身只值 5.9 ms，E 的 141.4 ms 里 135.5 ms（95.8%）是 rt 侧 `mem_call` / `js_add` 桥函数体的机器码执行（每桥 25.4 ns + 装箱税 1.4 ns）。
+- **QuickJS 旁证**：纯解释器跑同算法仅 85.5 ms，比 perry wasm × AOT（146.8 ms）还快 0.58×——无桥的解释器胜过有桥的机器码。
+- **修复天花板（等价手工特化实测）**：路径 3（发射点类型特化）→ B2 = 17.2 ms（快 7.1×）；路径 4（typed ABI 化 + 去影子栈）→ V3 = 3.3 ms，即与 perry 原生纯执行（1.6–2.6 ms）同数量级。用户裁决路径 4 为正确路线。
+- **方案文档**：`docs/typed-abi-migration.md`（6 阶段 16–30 人日，含上游 file:line 索引）；perry 原生路本身健康，纯执行仅比手写 C 慢 1.2–1.9×。
+
 
 ## Timeline
 
@@ -84,4 +97,22 @@ perry 的 wasm 后端产出的模块声明 211 个 `rt.*` 导入，把"运行时
   kind: decision
   summary: "compiled_truth 改为路线三实测架构: rt.* 运行时用 Rust (runtime-wasm/ no_std) 编成 wasm 模块, 业务与运行时两模块由 WAMR 多模块链接, 宿主只剩 WASI fd_write; 业务模块 import rt.memory, 运行时导出 memory (--global-base=2097152), 211 导入 = 13 实现 + 198 编译期桩 trap. 实测 demo.sh 6/6 PASS, 正向逐字节一致, 负向 array_new 报错退出码 1. 旧 C 桥接 (libperry_rt.so) 降为历史"
   source: "runtime-wasm/src/lib.rs + host/perry_link.c + tools/gen-rt-symbols.mjs + tools/patch-app-memory.mjs + demo.sh 实测"
+  affects: [perry-wasm-runtime-bridge]
+
+- time: 2026-09-20T00:44:31
+  kind: decision
+  summary: "增补 WAMR AOT 事实: AOT 不支持 import memory(须 wasm-merge 合并单模块), AOT 下干净 wasm 与原生同速, perry wasm vs perry 原生 393×→23×"
+  source: "tools/attribution/aot_e.sh + WAMR 源码 aot_emit_aot_file.c/aot_validator.c 实测"
+  affects: [perry-wasm-runtime-bridge]
+
+- time: 2026-09-21T03:23:36
+  kind: note
+  summary: "根因裁定: perry wasm 慢 100% 来自 codegen-wasm 类型擦除桥形态(非引擎/优化器)——干净 wasm×AOT 与原生同速 0.97×, perry wasm×AOT=104×原生, 141ms 里 95.8% 是 rt 桥函数体机器码(25.4ns/桥); QuickJS 纯解释器 85.5ms 竟快 0.58×; 修复: 路径3 类型特化→17.2ms, 路径4 typed ABI+去影子栈→3.3ms(同数量级), 方案见 docs/typed-abi-migration.md; perry 原生路纯执行仅 1.2-1.9× 手写 C"
+  source: "docs/performance.md 审计节 + docs/typed-abi-migration.md + tools/attribution/nohost_box_app.wat 隔离实验"
+  affects: [perry-wasm-runtime-bridge]
+
+- time: 2026-09-21T03:23:54
+  kind: decision
+  summary: "compiled_truth 追加「性能根因与修复路径（2026-09-21）」节: 根因=codegen-wasm 类型擦除桥形态(非引擎/优化器), QuickJS 纯解释器 85.5ms 反超 AOT 桥形态 0.58×, 修复天花板 路径3→17.2ms / 路径4→3.3ms, 方案 docs/typed-abi-migration.md"
+  source: "docs/performance.md 审计节 + docs/typed-abi-migration.md + tools/attribution/nohost_box_app.wat 隔离实验"
   affects: [perry-wasm-runtime-bridge]

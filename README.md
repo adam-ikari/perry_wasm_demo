@@ -55,7 +55,11 @@ Exception: bridge function 'array_new' is not implemented
 execute _start: Exception: unreachable
 ```
 
-产物：`build/app.wasm` 10650 B、`build/app_link.wasm` 10658 B、`build/rt.wasm` 16798 B。
+产物：`build/app.wasm` 10650 B、`build/app_link.wasm` 10658 B、`build/rt.wasm` 16928 B。
+性能基准另有 D 路 perry 原生产物：`build/bench_perry_native` 16.3 MB（TS → LLVM →
+可执行文件，`tools/attribution/bench_d.sh` 一键复现）与 E 路 WAMR AOT 产物：
+`build/bench_merged.aot` 74 KB（wasm-merge 合并单模块 → wamrc，`tools/attribution/
+aot_e.sh` 一键复现，见 `docs/performance.md`）。
 
 ## 互操作约定
 
@@ -80,3 +84,14 @@ execute _start: Exception: unreachable
 ## 文档导航
 
 - `docs/perry-wasm-wamr.md` — 架构原理与实施细节。
+- `docs/performance.md` — 六路性能基准（wasm×WAMR 解释器/AOT / wasm×V8 / 手写原生 / perry 原生 / QuickJS）。
+- `docs/typed-abi-migration.md` — 路径 4：perry-codegen-wasm typed ABI 化 + 去影子栈实施规划。
+
+## CI 性能基准
+
+六路基准（A/B/C/D/E/F）可在 GitHub Actions 上复现：`.github/workflows/bench.yml`
+（ubuntu-22.04）。手动 `workflow_dispatch` 或 PR 打 `bench` 标签触发；结果
+`build/bench-results.json` + 汇总表 + 原始样本上传 artifact。回归判定用「各目标 ÷ C
+原生」的倍数与 `docs/performance.md` 本机基线对照（±50% warning 不 fail；CI runner 与
+本机 CPU 不同，绝对时间不可跨机比较），首次运行即建立 CI 基线。复现与口径见
+`docs/performance.md`「测量口径 · CI 环境」与 `docs/process.md`「增补：性能测试迁移到 CI」。

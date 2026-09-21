@@ -1,0 +1,617 @@
+diff --git a/crates/perry-codegen-wasm/src/emit/compile.rs b/crates/perry-codegen-wasm/src/emit/compile.rs
+index 8555a88..c06b762 100644
+--- a/crates/perry-codegen-wasm/src/emit/compile.rs
++++ b/crates/perry-codegen-wasm/src/emit/compile.rs
+@@ -15,6 +15,12 @@ impl WasmModuleEmitter {
+             self.collect_strings(module);
+         }
+ 
++        // 构建 per-module 保守类型事实（Add/条件特化判定用）
++        self.type_facts = modules
++            .iter()
++            .map(|(_, module)| TypeFacts::from_module(module))
++            .collect();
++
+         // Register runtime import types and get type indices
+         // All imports use f64 for JSValues
+         let t_void = self.get_type_idx(vec![], vec![]);
+@@ -1310,7 +1316,7 @@ impl WasmModuleEmitter {
+ 
+             // Initialize globals — swap in per-module func_map for correct FuncRef resolution
+             for (mod_idx, (_, module)) in modules.iter().enumerate() {
+-                self.func_map = self.module_func_maps[mod_idx].clone();
++                self.current_mod_idx = mod_idx;
+                 for global in &module.globals {
+                     if let Some(init) = &global.init {
+                         let mut ctx =
+@@ -1330,7 +1336,7 @@ impl WasmModuleEmitter {
+ 
+             // Register class methods with the bridge and set up inheritance
+             for (mod_idx, (_, module)) in modules.iter().enumerate() {
+-                self.func_map = self.module_func_maps[mod_idx].clone();
++                self.current_mod_idx = mod_idx;
+                 for class in &module.classes {
+                     let class_name_id = self
+                         .string_map
+diff --git a/crates/perry-codegen-wasm/src/emit/expr/literals_vars.rs b/crates/perry-codegen-wasm/src/emit/expr/literals_vars.rs
+index 9c34109..7be7e49 100644
+--- a/crates/perry-codegen-wasm/src/emit/expr/literals_vars.rs
++++ b/crates/perry-codegen-wasm/src/emit/expr/literals_vars.rs
+@@ -176,11 +176,23 @@ impl<'a> FuncEmitCtx<'a> {
+             Expr::Binary { op, left, right } => {
+                 match op {
+                     BinaryOp::Add => {
+-                        // Use js_add for dynamic dispatch (handles string+number etc.)
+-                        self.emit_frame_begin(func, 2);
+-                        self.emit_store_arg(func, 0, left);
+-                        self.emit_store_arg(func, 1, right);
+-                        self.emit_memcall(func, "js_add", 2);
++                        // 特化：两侧可证 number → 内联 f64.add（与 rt
++                        // js_add(Num(a), Num(b)) = Num(a+b) 逐位等价；
++                        // perry number 表示 = 裸 f64 位型）。不推影子栈帧。
++                        if self.expr_is_number(left) && self.expr_is_number(right) {
++                            self.emit_expr(func, left);
++                            func.instruction(&Instruction::F64ReinterpretI64);
++                            self.emit_expr(func, right);
++                            func.instruction(&Instruction::F64ReinterpretI64);
++                            func.instruction(&Instruction::F64Add);
++                            func.instruction(&Instruction::I64ReinterpretF64);
++                        } else {
++                            // 回退：动态分派（保留 string+number 等 JS 语义）
++                            self.emit_frame_begin(func, 2);
++                            self.emit_store_arg(func, 0, left);
++                            self.emit_store_arg(func, 1, right);
++                            self.emit_memcall(func, "js_add", 2);
++                        }
+                     }
+                     // Bitwise ops need i32 truncation before the operation
+                     BinaryOp::BitAnd => {
+diff --git a/crates/perry-codegen-wasm/src/emit/mod.rs b/crates/perry-codegen-wasm/src/emit/mod.rs
+index 570a18b..291ce8e 100644
+--- a/crates/perry-codegen-wasm/src/emit/mod.rs
++++ b/crates/perry-codegen-wasm/src/emit/mod.rs
+@@ -36,6 +36,7 @@ mod module_emitter;
+ mod runtime_imports;
+ mod stmt;
+ mod string_collection;
++mod type_facts;
+ mod ui_method_map;
+ 
+ // Shared prelude — each sibling re-imports these via `use super::*;`.
+@@ -64,6 +65,7 @@ use module_emitter::WasmModuleEmitter;
+ use runtime_imports::RuntimeImports;
+ use stmt::has_return;
+ use ui_method_map::map_ui_method;
++use type_facts::TypeFacts;
+ 
+ /// Output from WASM compilation: binary + extra JS for async functions.
+ pub struct WasmCompileOutput {
+diff --git a/crates/perry-codegen-wasm/src/emit/module_emitter.rs b/crates/perry-codegen-wasm/src/emit/module_emitter.rs
+index 883b5aa..7c9523a 100644
+--- a/crates/perry-codegen-wasm/src/emit/module_emitter.rs
++++ b/crates/perry-codegen-wasm/src/emit/module_emitter.rs
+@@ -76,6 +76,8 @@ pub(super) struct WasmModuleEmitter {
+     /// `GlobalGet(gidx)` reading the live module-let slot, matching the
+     /// LLVM target's `perry_fn_<src>__<name>()` getter path.
+     pub(super) imported_var_globals: BTreeMap<(usize, String), u32>,
++    /// Per-module 保守类型事实（Add/条件特化用），compile() 开头构建。
++    pub(super) type_facts: Vec<TypeFacts>,
+ }
+ 
+ impl WasmModuleEmitter {
+@@ -108,6 +110,7 @@ impl WasmModuleEmitter {
+             func_param_counts: BTreeMap::new(),
+             async_js_code: Vec::new(),
+             imported_var_globals: BTreeMap::new(),
++            type_facts: Vec::new(),
+         }
+     }
+ 
+diff --git a/crates/perry-codegen-wasm/src/emit/stmt.rs b/crates/perry-codegen-wasm/src/emit/stmt.rs
+index 36fcbed..7d4c587 100644
+--- a/crates/perry-codegen-wasm/src/emit/stmt.rs
++++ b/crates/perry-codegen-wasm/src/emit/stmt.rs
+@@ -63,10 +63,17 @@ impl<'a> FuncEmitCtx<'a> {
+                 then_branch,
+                 else_branch,
+             } => {
+-                // Convert to i32 boolean via is_truthy
+-                self.emit_frame_begin(func, 1);
+-                self.emit_store_arg(func, 0, condition);
+-                self.emit_memcall_i32(func, "is_truthy", 1);
++                // 特化：条件可证二值盒布尔 → 假盒比较（is_truthy(盒布尔) ≡ v != TAG_FALSE）
++                if self.expr_is_boolean(condition) {
++                    self.emit_expr(func, condition);
++                    func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
++                    func.instruction(&Instruction::I64Ne);
++                } else {
++                    // 回退：通用 truthiness 桥（0/-0/NaN 等非二值 falsy 语义保留）
++                    self.emit_frame_begin(func, 1);
++                    self.emit_store_arg(func, 0, condition);
++                    self.emit_memcall_i32(func, "is_truthy", 1);
++                }
+                 func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+                 self.block_depth += 1;
+                 for s in then_branch {
+@@ -109,9 +116,15 @@ impl<'a> FuncEmitCtx<'a> {
+                     false
+                 };
+ 
+-                self.emit_frame_begin(func, 1);
+-                self.emit_store_arg(func, 0, condition);
+-                self.emit_memcall_i32(func, "is_truthy", 1);
++                if self.expr_is_boolean(condition) {
++                    self.emit_expr(func, condition);
++                    func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
++                    func.instruction(&Instruction::I64Ne);
++                } else {
++                    self.emit_frame_begin(func, 1);
++                    self.emit_store_arg(func, 0, condition);
++                    self.emit_memcall_i32(func, "is_truthy", 1);
++                }
+                 func.instruction(&Instruction::I32Eqz);
+                 func.instruction(&Instruction::BrIf(1)); // break to outer block
+ 
+@@ -161,9 +174,15 @@ impl<'a> FuncEmitCtx<'a> {
+                     self.emit_stmt(func, s, in_returning_func);
+                 }
+ 
+-                self.emit_frame_begin(func, 1);
+-                self.emit_store_arg(func, 0, condition);
+-                self.emit_memcall_i32(func, "is_truthy", 1);
++                if self.expr_is_boolean(condition) {
++                    self.emit_expr(func, condition);
++                    func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
++                    func.instruction(&Instruction::I64Ne);
++                } else {
++                    self.emit_frame_begin(func, 1);
++                    self.emit_store_arg(func, 0, condition);
++                    self.emit_memcall_i32(func, "is_truthy", 1);
++                }
+                 func.instruction(&Instruction::BrIf(0)); // loop back if truthy
+ 
+                 self.block_depth -= 1;
+@@ -221,9 +240,15 @@ impl<'a> FuncEmitCtx<'a> {
+                 // block_depth is now the loop's depth; Br(0) here restarts the loop.
+ 
+                 if let Some(cond) = condition {
+-                    self.emit_frame_begin(func, 1);
+-                    self.emit_store_arg(func, 0, cond);
+-                    self.emit_memcall_i32(func, "is_truthy", 1);
++                    if self.expr_is_boolean(cond) {
++                        self.emit_expr(func, cond);
++                        func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
++                        func.instruction(&Instruction::I64Ne);
++                    } else {
++                        self.emit_frame_begin(func, 1);
++                        self.emit_store_arg(func, 0, cond);
++                        self.emit_memcall_i32(func, "is_truthy", 1);
++                    }
+                     func.instruction(&Instruction::I32Eqz);
+                     // loop is directly inside block, so break is always 1 level up
+                     func.instruction(&Instruction::BrIf(1));
+diff --git a/crates/perry-codegen-wasm/src/emit/type_facts.rs b/crates/perry-codegen-wasm/src/emit/type_facts.rs
+new file mode 100644
+index 0000000..a13f7c1
+--- /dev/null
++++ b/crates/perry-codegen-wasm/src/emit/type_facts.rs
+@@ -0,0 +1,419 @@
++//! 保守类型事实（perry-codegen-wasm 专用，零 HIR 分析依赖）。
++//!
++//! vendored perry（87ecb02b）的 `perry-hir` **没有** main 分支的
++//! `analysis/value_types.rs`（`infer_expr_type`/`HirTypeEnv`），因此这里用
++//! 轻量数据流自行收集"可证 number / 可证布尔"，供 `+` 与条件判定的
++//! 发射点特化使用。
++//!
++//! number 判据（perry 的 number 表示 = 裸 f64 位型 i64，rt
++//! `encode(V::Num(n)) = n.to_bits()`）：
++//! - `Expr::Number` / `Expr::Integer` 字面量；
++//! - 声明为 `Number`/`Int32` 的参数与 `let`；
++//! - perry codegen **无条件** f64 内联的表达式：`Sub`/`Mul`/`Div`
++//!   （`literals_vars.rs` 的 `_ =>` 分支）、`Neg`/`Pos`、`Update`（`++`/`--`）——
++//!   这些产物恒为 f64 位型，perry 自身已把它们当 number 处理，不引入新假设；
++//! - 返回类型声明为 number 的函数调用（`FuncRef` callee，与原生后端
++//!   typed ABI 同样信任声明类型）；
++//! - 两侧都可证的 `+`（递归）。
++//!
++//! boolean 判据（二值盒布尔 `TAG_TRUE`/`TAG_FALSE`，`is_truthy(盒布尔) ≡
++//! `v != TAG_FALSE`，逐位等价）：
++//! - `Expr::Bool` 字面量；
++//! - `Expr::Compare`（发射恒为 If 选 `TAG_TRUE`/`TAG_FALSE` 二值）；
++//! - `!x`（`UnaryOp::Not`，发射同样恒为二值盒布尔）；
++//! - 声明为 `Boolean` 的局部；返回布尔可证的调用。
++//!
++//! 数据流补充（否则无注解的 `let sum = 0` 无法证明，`sum += i` 走不到
++//! 内联）：无注解 `let x = <init>` 且 init 可证 number/boolean → x 进入
++//! 候选；随后做**赋值敏感不动点**——x 的每个赋值点 RHS 都必须可证同型
++//! 才保留（`Update` 恒 number，不破坏 number 候选；但会破坏 boolean 候选，
++//! 故 boolean 候选遇 `Update` 拒绝）。从乐观初值单调递减，收敛后剩余
++//! 候选在任意执行路径上取值都可证同型，不会误证。
++//!
++//! 拒绝规则（保证不误证）：被闭包捕获或函数 `captures` 捕获的 id 一律
++//! 拒绝（跨函数流不可静态跟踪）；无法穷尽遍历的表达式形态不参与判断
++//! （保守走原桥）。
++//!
++//! 回退语义：任何不可证处保留原桥（`js_add`/`is_truthy`），行为不变。
++
++use super::*;
++use perry_hir::walker::walk_expr_children;
++use perry_types::Type;
++use std::collections::BTreeSet;
++pub(super) struct TypeFacts {
++    /// local id → 可证类型（特化只消费 Number/Int32/Boolean；其余保留声明值，
++    /// 但不会被 `expr_is_*` 采纳）
++    locals: BTreeMap<LocalId, Type>,
++    /// func id → 声明返回类型（来自 `module.functions`）
++    function_returns: BTreeMap<FuncId, Type>,
++}
++impl Clone for TypeFacts {
++    fn clone(&self) -> Self {
++        Self {
++            locals: self.locals.clone(),
++            function_returns: self.function_returns.clone(),
++        }
++    }
++}
++
++fn is_number_type(t: &Type) -> bool {
++    matches!(t, Type::Number | Type::Int32)
++}
++
++fn is_boolean_type(t: &Type) -> bool {
++    matches!(t, Type::Boolean)
++}
++
++impl TypeFacts {
++    pub(super) fn from_module(module: &perry_hir::ir::Module) -> Self {
++        let mut facts = Self {
++            locals: BTreeMap::new(),
++            function_returns: BTreeMap::new(),
++        };
++        for f in &module.functions {
++            facts.function_returns.insert(f.id, f.return_type.clone());
++        }
++
++        // 数据流收集：候选（无注解 let 且 init 可证）+ 赋值点 + 闭包捕获
++        let mut candidates: BTreeMap<LocalId, Type> = BTreeMap::new();
++        let mut values: BTreeMap<LocalId, Vec<Expr>> = BTreeMap::new();
++        let mut updated: BTreeSet<LocalId> = BTreeSet::new();
++        let mut blocked: BTreeSet<LocalId> = BTreeSet::new();
++
++        // 第 1 遍：声明类型（参数 + globals + 函数捕获拒绝），
++        // 作为数据流候选判断的只读快照 `decl`（避免与 `&mut facts.locals`
++        // 同时借用 facts）。
++        for f in &module.functions {
++            // 函数捕获的模块级 let：跨函数流不可跟踪 → 拒绝数据流补充
++            for c in &f.captures {
++                blocked.insert(*c);
++            }
++            for p in &f.params {
++                facts.locals.insert(p.id, p.ty.clone());
++            }
++        }
++        for g in &module.globals {
++            facts.locals.insert(g.id, g.ty.clone());
++        }
++        let decl = facts.clone();
++
++        // 第 2 遍：带注解 let 入表 + 数据流候选 + 赋值点收集
++        for f in &module.functions {
++            for s in &f.body {
++                collect_stmt(
++                    s,
++                    &mut facts.locals,
++                    &mut candidates,
++                    &mut values,
++                    &mut updated,
++                    &mut blocked,
++                    &decl,
++                );
++            }
++        }
++        for g in &module.globals {
++            if let Some(init) = &g.init {
++                collect_expr(init, &mut values, &mut updated, &mut blocked);
++            }
++        }
++        for s in &module.init {
++            collect_stmt(
++                s,
++                &mut facts.locals,
++                &mut candidates,
++                &mut values,
++                &mut updated,
++                &mut blocked,
++                &decl,
++            );
++        }
++
++        // 赋值敏感不动点：从乐观初值单调递减，收敛后剩余候选安全。
++        // 每轮用"声明 + 当前候选"构造工作集检查每个候选的所有赋值 RHS。
++        loop {
++            let mut working = facts.clone();
++            for (id, ty) in &candidates {
++                working.locals.insert(*id, ty.clone());
++            }
++            let mut changed = false;
++            for (id, ty) in candidates.clone() {
++                let ok = candidate_ok(&id, &ty, &values, &updated, &blocked, &working);
++                if !ok {
++                    candidates.remove(&id);
++                    changed = true;
++                }
++            }
++            if !changed {
++                break;
++            }
++        }
++        for (id, ty) in candidates {
++            facts.locals.insert(id, ty);
++        }
++
++        facts
++    }
++
++    /// 操作数可静态证明为 number（裸 f64 位型）。
++    pub(super) fn expr_is_number(&self, e: &Expr) -> bool {
++        match e {
++            Expr::Number(_) | Expr::Integer(_) => true,
++            Expr::LocalGet(id) => self
++                .locals
++                .get(id)
++                .map_or(false, is_number_type),
++            // perry 无条件 f64 内联的产物：恒为 f64 位型
++            Expr::Update { .. } => true,
++            Expr::Unary {
++                op: UnaryOp::Neg | UnaryOp::Pos,
++                ..
++            } => true,
++            Expr::Binary {
++                op: BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div,
++                ..
++            } => true,
++            // `+` 递归：两侧都可证才内联（字符串分支保守回退）
++            Expr::Binary {
++                op: BinaryOp::Add,
++                left,
++                right,
++            } => self.expr_is_number(left) && self.expr_is_number(right),
++            Expr::Call { callee, .. } => match &**callee {
++                Expr::FuncRef(id) => self
++                    .function_returns
++                    .get(id)
++                    .map_or(false, is_number_type),
++                _ => false,
++            },
++            _ => false,
++        }
++    }
++
++    /// 表达式可静态证明为二值盒布尔（TAG_TRUE/TAG_FALSE）。
++    pub(super) fn expr_is_boolean(&self, e: &Expr) -> bool {
++        match e {
++            Expr::Bool(_) => true,
++            // Compare 发射恒为 If(Result I64) 选 TAG_TRUE/TAG_FALSE 二值
++            Expr::Compare { .. } => true,
++            // !x 发射同样恒为二值盒布尔
++            Expr::Unary {
++                op: UnaryOp::Not, ..
++            } => true,
++            Expr::LocalGet(id) => self
++                .locals
++                .get(id)
++                .map_or(false, is_boolean_type),
++            Expr::Call { callee, .. } => match &**callee {
++                Expr::FuncRef(id) => self
++                    .function_returns
++                    .get(id)
++                    .map_or(false, is_boolean_type),
++                _ => false,
++            },
++            _ => false,
++        }
++    }
++}
++
++/// 候选 id 是否安全：未被闭包捕获、boolean 候选未被 `++`/`--` 破坏、
++/// 且所有赋值 RHS 可证同型。
++fn candidate_ok(
++    id: &LocalId,
++    ty: &Type,
++    values: &BTreeMap<LocalId, Vec<Expr>>,
++    updated: &BTreeSet<LocalId>,
++    blocked: &BTreeSet<LocalId>,
++    facts: &TypeFacts,
++) -> bool {
++    if blocked.contains(id) {
++        return false;
++    }
++    if is_boolean_type(ty) && updated.contains(id) {
++        // ++/-- 把布尔变成 number，破坏二值盒布尔保证
++        return false;
++    }
++    match values.get(id) {
++        None => true, // 仅初始化赋值 → init 可证即安全
++        Some(rhs_list) => rhs_list.iter().all(|v| {
++            if is_number_type(ty) {
++                facts.expr_is_number(v)
++            } else if is_boolean_type(ty) {
++                facts.expr_is_boolean(v)
++            } else {
++                false
++            }
++        }),
++    }
++}
++
++/// 递归收集语句：Let 声明/候选 + 子语句；表达式经 `collect_expr` 收集赋值点。
++fn collect_stmt(
++    stmt: &Stmt,
++    locals: &mut BTreeMap<LocalId, Type>,
++    candidates: &mut BTreeMap<LocalId, Type>,
++    values: &mut BTreeMap<LocalId, Vec<Expr>>,
++    updated: &mut BTreeSet<LocalId>,
++    blocked: &mut BTreeSet<LocalId>,
++    decl_facts: &TypeFacts,
++) {
++    match stmt {
++        Stmt::Let { id, ty, init, .. } => {
++            if is_number_type(ty) || is_boolean_type(ty) {
++                // 带注解声明：权威类型直接入表（与原生 typed ABI 同样信任声明）
++                locals.insert(*id, ty.clone());
++            } else if let Some(init) = init {
++                // 无注解 let：init 可证 → 数据流候选
++                if decl_facts.expr_is_number(init) {
++                    candidates.insert(*id, Type::Number);
++                } else if decl_facts.expr_is_boolean(init) {
++                    candidates.insert(*id, Type::Boolean);
++                }
++                collect_expr(init, values, updated, blocked);
++            }
++        }
++        Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Throw(e) => {
++            collect_expr(e, values, updated, blocked);
++        }
++        Stmt::If {
++            condition,
++            then_branch,
++            else_branch,
++        } => {
++            collect_expr(condition, values, updated, blocked);
++            for s in then_branch {
++                collect_stmt(s, locals, candidates, values, updated, blocked, decl_facts);
++            }
++            if let Some(eb) = else_branch {
++                for s in eb {
++                    collect_stmt(s, locals, candidates, values, updated, blocked, decl_facts);
++                }
++            }
++        }
++        Stmt::While { condition, body } => {
++            collect_expr(condition, values, updated, blocked);
++            for s in body {
++                collect_stmt(s, locals, candidates, values, updated, blocked, decl_facts);
++            }
++        }
++        Stmt::DoWhile { body, condition } => {
++            for s in body {
++                collect_stmt(s, locals, candidates, values, updated, blocked, decl_facts);
++            }
++            collect_expr(condition, values, updated, blocked);
++        }
++        Stmt::For {
++            init,
++            condition,
++            update,
++            body,
++        } => {
++            if let Some(i) = init {
++                collect_stmt(i, locals, candidates, values, updated, blocked, decl_facts);
++            }
++            if let Some(c) = condition {
++                collect_expr(c, values, updated, blocked);
++            }
++            if let Some(u) = update {
++                collect_expr(u, values, updated, blocked);
++            }
++            for s in body {
++                collect_stmt(s, locals, candidates, values, updated, blocked, decl_facts);
++            }
++        }
++        Stmt::Labeled { body, .. } => {
++            collect_stmt(body, locals, candidates, values, updated, blocked, decl_facts);
++        }
++        Stmt::Try {
++            body,
++            catch,
++            finally,
++        } => {
++            for s in body {
++                collect_stmt(s, locals, candidates, values, updated, blocked, decl_facts);
++            }
++            if let Some(catch_clause) = catch {
++                for s in &catch_clause.body {
++                    collect_stmt(s, locals, candidates, values, updated, blocked, decl_facts);
++                }
++            }
++            if let Some(fin) = finally {
++                for s in fin {
++                    collect_stmt(s, locals, candidates, values, updated, blocked, decl_facts);
++                }
++            }
++        }
++        Stmt::Switch {
++            discriminant,
++            cases,
++        } => {
++            collect_expr(discriminant, values, updated, blocked);
++            for case in cases {
++                if let Some(test) = &case.test {
++                    collect_expr(test, values, updated, blocked);
++                }
++                for s in &case.body {
++                    collect_stmt(s, locals, candidates, values, updated, blocked, decl_facts);
++                }
++            }
++        }
++        Stmt::Break
++        | Stmt::Continue
++        | Stmt::LabeledBreak(_)
++        | Stmt::LabeledContinue(_)
++        | Stmt::Return(None)
++        | Stmt::PreallocateBoxes(_) => {}
++    }
++}
++
++/// 递归收集表达式中的赋值目标与闭包捕获。
++/// 子表达式经 `walk_expr_children`（perry-hir 穷尽遍历，编译期强制覆盖
++/// 所有 Expr 变体）递归；Closure body 不在 walker 范围内，捕获列表单独处理。
++fn collect_expr(
++    expr: &Expr,
++    values: &mut BTreeMap<LocalId, Vec<Expr>>,
++    updated: &mut BTreeSet<LocalId>,
++    blocked: &mut BTreeSet<LocalId>,
++) {
++    match expr {
++        Expr::LocalSet(id, value) => {
++            values.entry(*id).or_default().push((**value).clone());
++        }
++        Expr::Update { id, .. } => {
++            updated.insert(*id);
++        }
++        Expr::Closure {
++            captures,
++            mutable_captures,
++            ..
++        } => {
++            for c in captures {
++                blocked.insert(*c);
++            }
++            for c in mutable_captures {
++                blocked.insert(*c);
++            }
++        }
++        _ => {}
++    }
++    walk_expr_children(expr, &mut |child| {
++        collect_expr(child, values, updated, blocked);
++    });
++}
++
++impl<'a> FuncEmitCtx<'a> {
++    /// 发射期特化判定：操作数可证 number → 内联 f64.add。
++    pub(super) fn expr_is_number(&self, e: &Expr) -> bool {
++        self.emitter
++            .type_facts
++            .get(self.emitter.current_mod_idx)
++            .map_or(false, |f| f.expr_is_number(e))
++    }
++
++    /// 发射期特化判定：条件可证二值盒布尔 → 内联假盒比较。
++    pub(super) fn expr_is_boolean(&self, e: &Expr) -> bool {
++        self.emitter
++            .type_facts
++            .get(self.emitter.current_mod_idx)
++            .map_or(false, |f| f.expr_is_boolean(e))
++    }
++}

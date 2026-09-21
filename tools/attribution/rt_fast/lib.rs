@@ -1,10 +1,7 @@
 //! perry-rt-wasm — perry 的 `rt.*` 运行时，用 Rust 写成、编译成 wasm 模块。
 //!
 //! 与 host/perry_rt.c (探针版宿主) 实现同一套 ABI，但形态完全不同：
-//! 不是宿主进程里的共享库，而是一个独立的 wasm 模块，导出 memory 供业务模块 import
-//! （patch-app-memory.mjs 改写），
-//! 优化：`invoke()` 的 nameId→桥索引缓存直查（`NAME_CACHE`），消除热路径上
-//! 对 10 项 BRIDGES 的按名线性 memcmp 扫描（2026-09 采纳自 tools/attribution/rt_fast 实验）。
+//! 不是宿主进程里的共享库，而是一个独立的 wasm 模块，import 业务模块的内存，
 //! export 业务模块需要的 211 个 `rt.*` 函数。合并成一个模块之后，宿主只剩 WASI。
 //!
 //! ABI 事实来源：perry-runtime/src/value.rs 的 NaN-boxing 编码 + 业务 wasm 的导入段。
@@ -566,12 +563,13 @@ fn bridge(index: usize, args: &[V], argc: usize) -> V {
         _ => unreachable!(),
     }
 }
-/// nameId→桥索引缓存直查：已知 nameId 跳过 BRIDGES 按名线性扫描（memcmp 10 项），
-/// 首次命中时填表，未知 nameId 回退扫描。0xFF = 未缓存。
-static mut NAME_CACHE: [u8; 64] = [0xFF; 64];
-
 
 /// 读取参数槽位 → 按名字分派 → 返回结果。
+/// [实验版 fast-dispatch] 已知 nameId 直接跳表，未知 nameId 回退按名扫描。
+///   js_add=8, is_truthy=12, console_log=4（取证见 probe_nameid.md）。
+/// 为通用性，实验版在运行时先按名扫描建立 nameId→index 缓存表（首次命中后零扫描）。
+static mut NAME_CACHE: [u8; 64] = [0xFF; 64]; // 0xFF = 未缓存
+
 fn invoke(name_id: f64, arg_count: f64, base: u32) -> V {
     let name = name_id as u32;
     let argc = arg_count as u32 as usize;
@@ -585,6 +583,7 @@ fn invoke(name_id: f64, arg_count: f64, base: u32) -> V {
         });
         *slot = decode(bits);
     }
+    // fast path: nameId 缓存直查
     if name < 64 {
         let cached = unsafe { *core::ptr::addr_of!(NAME_CACHE).cast::<u8>().add(name as usize) };
         if cached != 0xFF {
@@ -635,4 +634,4 @@ pub extern "C" fn initialize() {}
 // ---------------------------------------------------------------- 未实现的导入
 
 // 由 tools/gen-rt-symbols.mjs 从 build/app.wasm 的导入段生成 (198 个桩)。
-include!("../../build/rt_symbols.rs");
+include!("../build/rt_symbols.rs"); // [实验版] 相对 src/ 的路径

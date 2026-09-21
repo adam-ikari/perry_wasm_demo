@@ -1,0 +1,17 @@
+artifact|cand|options|size|median_ms|min_ms|samples|output_correct
+clean|default|<default>|2136|1.562|1.462|24|2
+clean|segue|--enable-segue|2056|1.267|1.190|24|2
+clean|segue_nojt|--enable-segue --disable-llvm-jump-tables|2056|1.214|1.183|24|2
+clean|tgt_segue_nojt|--target=x86_64 --enable-segue --disable-llvm-jump-tables|2056|1.273|1.136|24|2
+clean|tgt_only|--target=x86_64|2136|1.411|1.289|24|2
+clean|tgt_v3_segue_nojt|--target=x86_64 --cpu=x86-64-v3 --enable-segue --disable-llvm-jump-tables|2056|1.274|1.127|24|2
+clean|O2|--opt-level=2|2136|1.406|1.227|24|2
+clean|segue_nolto|--disable-llvm-lto --enable-segue|2064|2.228|2.014|24|2
+merged|default|<default>|74296|134.384|127.400|24|2
+merged|segue|--enable-segue|72920|120.239|116.036|24|2
+merged|segue_nojt|--enable-segue --disable-llvm-jump-tables|70096|116.391|113.208|24|2
+merged|tgt_segue_nojt|--target=x86_64 --enable-segue --disable-llvm-jump-tables|66616|105.834|101.726|24|2
+merged|tgt_only|--target=x86_64|70632|123.313|118.970|24|2
+merged|tgt_v3_segue_nojt|--target=x86_64 --cpu=x86-64-v3 --enable-segue --disable-llvm-jump-tables|67496|105.610|101.649|24|2
+merged|O2|--opt-level=2|105288|124.187|120.278|24|2
+merged|segue_nolto|--disable-llvm-lto --enable-segue|73000|115.354|111.434|24|2

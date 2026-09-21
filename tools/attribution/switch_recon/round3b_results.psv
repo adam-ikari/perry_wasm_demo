@@ -1,0 +1,26 @@
+artifact|label|size|median_ms|min_ms|samples|output_correct
+clean|cpu-features=<none>|2136|1.427|1.319|24|2
+merged|cpu-features=<none>|74296|126.129|123.840|24|2
+clean|cpu-features=+avx2|2136|1.287|1.159|24|2
+merged|cpu-features=+avx2|74296|128.083|124.429|24|2
+clean|cpu-features=-avx2|2136|1.369|1.243|24|2
+merged|cpu-features=-avx2|74296|129.486|122.668|24|2
+clean|cpu-features=+avx512f|2136|1.324|1.166|24|2
+merged|cpu-features=+avx512f|73992|NA|NA|0|0
+clean|cpu-features=+prefer-256-bit|2136|1.351|1.170|24|2
+merged|cpu-features=+prefer-256-bit|74296|125.964|120.913|24|2
+clean|cpu-features=-prefer-256-bit|2136|1.312|1.156|24|2
+merged|cpu-features=-prefer-256-bit|74296|125.831|123.526|24|2
+merged|wasm-opt -O2 (pre=20886) + wamrc [<default>]|73276|127.749|122.161|24|2
+merged|wasm-opt -O2 (pre=20886) + wamrc [--enable-segue --disable-llvm-jump-tables]|69368|113.792|110.676|24|2
+merged|wasm-opt -O3 (pre=20801) + wamrc [<default>]|73260|129.137|124.523|24|2
+merged|wasm-opt -O3 (pre=20801) + wamrc [--enable-segue --disable-llvm-jump-tables]|69288|113.419|110.077|24|2
+merged|wasm-opt -O4 (pre=20805) + wamrc [<default>]|73260|127.311|124.178|24|2
+merged|wasm-opt -O4 (pre=20805) + wamrc [--enable-segue --disable-llvm-jump-tables]|69288|113.344|110.854|24|2
+merged|wasm-opt -O3 --flatten (pre=21356) + wamrc [<default>]|73260|128.222|122.869|24|2
+merged|wasm-opt -O3 --flatten (pre=21356) + wamrc [--enable-segue --disable-llvm-jump-tables]|69288|113.948|110.999|24|2
+merged|wasm-opt -O3 --inlining-optimizing (pre=20801) + wamrc [<default>]|73260|128.369|123.952|24|2
+merged|wasm-opt -O3 --inlining-optimizing (pre=20801) + wamrc [--enable-segue --disable-llvm-jump-tables]|69288|113.044|110.426|24|2
+merged|wasm-opt -O3 --always-inline-max-function-size=200 (pre=122058) + wamrc [<default>]|258376|120.021|116.418|24|2
+merged|wasm-opt -O3 --always-inline-max-function-size=200 (pre=122058) + wamrc [--enable-segue --disable-llvm-jump-tables]|246092|112.446|108.109|24|2
+clean|wasm-opt -O3 (pre=470)|1792|1.372|1.203|24|2

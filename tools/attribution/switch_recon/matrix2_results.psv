@@ -1,0 +1,45 @@
+artifact|options|compile|size|median_ms|min_ms|samples
+clean|<default>|ok|2136|1.268|1.196|12
+clean|--target=x86_64|ok|2136|1.293|1.215|12
+clean|--target=x86_64 --cpu=x86-64-v3|ok|2136|1.268|1.249|12
+clean|--target=x86_64 --cpu=x86-64-v2|ok|2136|1.369|1.279|12
+matrix2.sh: line 36: 3888861 Aborted                 $WAMRC $O -o "$AOT" "$SRC" > "$OUT/$TAG.log" 2>&1
+clean|--target=x86_64 --cpu=znver4|FAIL|0|NA|NA|0
+clean|--target=x86_64 --cpu=skylake|ok|2136|1.297|1.173|12
+clean|--target=x86_64 --cpu=haswell|ok|2136|1.248|1.161|12
+clean|--target=x86_64 --cpu-features=+avx2|FAIL|0|NA|NA|0
+clean|--target=x86_64 --cpu-features=-avx2|FAIL|0|NA|NA|0
+clean|--target=x86_64 --cpu-features=+prefer-256-bit|FAIL|0|NA|NA|0
+clean|--enable-segue|ok|2056|1.121|1.032|12
+clean|--enable-segue=all|FAIL|0|NA|NA|0
+clean|--opt-level=2 --enable-segue|ok|2056|1.211|1.041|12
+clean|--opt-level=2|ok|2136|1.300|1.179|12
+clean|--size-level=2 --enable-segue|ok|2056|1.115|1.037|12
+clean|--enable-segue --disable-llvm-jump-tables|ok|2056|1.126|1.040|12
+clean|--enable-segue --disable-llvm-intrinsics|ok|2056|1.193|1.050|12
+clean|--enable-llvm-passes=inline,loop-unroll|ok|2168|1.341|1.263|12
+clean|--mllvm=-inline-threshold=1000|ok|2896|1.279|1.157|12
+clean|--mllvm=-unroll-threshold=100000|ok|2136|1.292|1.184|12
+clean|--disable-llvm-lto --enable-segue|ok|2064|2.066|1.914|12
+merged|<default>|ok|74296|127.868|124.250|12
+merged|--target=x86_64|ok|70632|120.223|117.246|12
+merged|--target=x86_64 --cpu=x86-64-v3|ok|71344|117.468|115.444|12
+merged|--target=x86_64 --cpu=x86-64-v2|ok|71232|118.581|115.227|12
+matrix2.sh: line 36: 3889695 Aborted                 $WAMRC $O -o "$AOT" "$SRC" > "$OUT/$TAG.log" 2>&1
+merged|--target=x86_64 --cpu=znver4|FAIL|0|NA|NA|0
+merged|--target=x86_64 --cpu=skylake|ok|71344|122.760|119.684|12
+merged|--target=x86_64 --cpu=haswell|ok|71344|120.728|115.078|12
+merged|--target=x86_64 --cpu-features=+avx2|FAIL|0|NA|NA|0
+merged|--target=x86_64 --cpu-features=-avx2|FAIL|0|NA|NA|0
+merged|--target=x86_64 --cpu-features=+prefer-256-bit|FAIL|0|NA|NA|0
+merged|--enable-segue|ok|72920|114.564|113.049|12
+merged|--enable-segue=all|FAIL|0|NA|NA|0
+merged|--opt-level=2 --enable-segue|ok|104296|114.657|112.502|12
+merged|--opt-level=2|ok|105288|119.460|115.075|12
+merged|--size-level=2 --enable-segue|ok|72920|115.862|111.816|12
+merged|--enable-segue --disable-llvm-jump-tables|ok|70096|110.831|107.382|12
+merged|--enable-segue --disable-llvm-intrinsics|ok|72920|114.462|112.478|12
+merged|--enable-llvm-passes=inline,loop-unroll|ok|238724|126.294|125.591|12
+merged|--mllvm=-inline-threshold=1000|ok|239788|128.050|124.733|12
+merged|--mllvm=-unroll-threshold=100000|ok|74296|124.593|122.745|12
+merged|--disable-llvm-lto --enable-segue|ok|73000|111.125|110.508|12

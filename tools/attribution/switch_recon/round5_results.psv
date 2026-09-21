@@ -1,0 +1,9 @@
+cand|size|median_ms|min_ms|samples|correct
+default|74296|121.692|118.039|12|2
+O4|74296|123.500|119.084|12|2
+size4|74296|122.578|119.458|12|2
+noreftypes|74296|122.405|120.795|12|2
+dumpcallstack|137244|NA|NA|0|0
+linuxperf|74868|122.647|120.538|12|2
+perfprof|192212|NA|NA|0|0
+memprof|79616|125.894|125.204|12|2
