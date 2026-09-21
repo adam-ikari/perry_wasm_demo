@@ -15,7 +15,7 @@ A Systematic Exploration from Runtime Modularization through Performance Attribu
 
 TypeScript 的交付长期等同于交付源码：打包与压缩只增加阅读成本，不改变语义可读性。编译成原生二进制能解决源码外流，却把"一次编写、到处运行"换成"一次编写、到处编译"，交叉编译矩阵随平台数量增长。WebAssembly 提供了第三条路。本文记录一次完整的技术探索：把 perry 编译器产出的 TypeScript→wasm 模块跑在**没有任何 JavaScript 引擎**的宿主上，宿主只保留 WASI 的 `fd_write`。
 
-探索分三段。第一段解决"能不能跑"：把 perry 的 Rust 运行时以 `#![no_std]` 编译成独立的 wasm 模块，与业务模块由 WAMR 多模块机制链接，业务模块的 211 个 `rt.*` 导入全部由该模块提供，其中 13 个真实实现、198 个编译期生成的报错桩；正负向用例 6/6 通过，输出与 perry 自带 JS 宿主层逐字节一致。第二段解决"慢在哪里"：用同一份 `src/bench.ts`（fib(29) 加 10⁶ 次循环）建立六路对照，把总倍数按**乘性因子**分解为「引擎因子 × codegen 因子」并做闭合校验（误差 <5%），用手写"干净对照 wasm"隔离引擎，用 V8 的 TurboFan 稳态与 QuickJS 旁证交叉验证。结论是引擎无过：干净 wasm 在 WAMR AOT 下与手写 C 同速（0.97×），根因是 perry wasm codegen 的类型擦除，`+` 与条件判定被强制过桥，桥函数体占 AOT 路耗时的 95.8%。第三段解决"怎么修、修到多少"：先做零上游依赖的 wat 后处理 pass（4 程序 × 7 变体共 28 次逐字节一致、0 误判、bench 快 7.3×），再直接修改上游 `perry-codegen-wasm` 的发射点，结果是 **122.112 ms → 3.891 ms（快 31.4×）**，跨过等价手工特化的上界 17.185 ms，逼近全去盒的 3.325 ms。
+探索分三段。第一段先解决"能不能跑"：把 perry 的 Rust 运行时以 `#![no_std]` 编译成独立的 wasm 模块，与业务模块由 WAMR 多模块机制链接，业务模块的 211 个 `rt.*` 导入全部由该模块提供，其中 13 个真实实现、198 个编译期生成的报错桩；正负向用例 6/6 通过，输出与 perry 自带 JS 宿主层逐字节一致。第二段再解决"慢在哪里"：用同一份 `src/bench.ts`（fib(29) 加 10⁶ 次循环）建立六路对照，把总倍数按**乘性因子**分解为「引擎因子 × codegen 因子」并做闭合校验（误差 <5%），用手写"干净对照 wasm"隔离引擎，用 V8 的 TurboFan 稳态与 QuickJS 旁证交叉验证。结论不在引擎一侧：干净 wasm 在 WAMR AOT 下与手写 C 同速（0.97×），根因是 perry wasm codegen 的类型擦除——`+` 与条件判定被强制过桥，桥函数体占 AOT 路耗时的 95.8%。第三段据此回到"怎么修、修到多少"：先做零上游依赖的 wat 后处理 pass（4 程序 × 7 变体共 28 次逐字节一致、0 误判、bench 快 7.3×），再直接修改上游 `perry-codegen-wasm` 的发射点，结果是 **122.112 ms → 3.891 ms（快 31.4×）**，跨过等价手工特化的上界 17.185 ms，逼近全去盒的 3.325 ms。
 
 **关键词：** WebAssembly；TypeScript 编译器；运行时模块化；性能归因；类型特化；WAMR
 
@@ -25,7 +25,7 @@ TypeScript 的交付长期等同于交付源码：打包与压缩只增加阅读
 
 TypeScript delivery has long meant source delivery. Bundling and minification raise reading cost but leave semantics legible. Compiling to a native binary solves source exposure but trades "write once, run anywhere" for "write once, compile everywhere", and the cross-compilation matrix grows with every platform. WebAssembly offers a third path. This paper reports a complete exploration: running perry's TypeScript-to-wasm module on a host with **no JavaScript engine at all**, where the host retains only WASI `fd_write`.
 
-The exploration has three stages. The first establishes feasibility: perry's Rust runtime is compiled as a standalone `#![no_std]` wasm module, linked with the application module through WAMR's multi-module mechanism; all 211 `rt.*` imports of the application are supplied by that module, 13 with real implementations and 198 with compile-time-generated trap stubs. All six demo steps pass, with byte-identical output against perry's bundled JavaScript host layer. The second stage locates the cost: six execution routes run the same `src/bench.ts` (fib(29) plus a 10⁶-iteration loop), and the total slowdown is factored **multiplicatively** into an engine factor and a codegen factor with closure checks (error below 5%). A hand-written "clean" wasm isolates the engine; V8's TurboFan steady state and QuickJS provide independent cross-validation. The engine is not at fault: clean wasm under WAMR AOT runs at native speed (0.97×), while the root cause is type erasure in perry's wasm codegen, which forces `+` and conditions across a dynamic-dispatch bridge whose function body accounts for 95.8% of the AOT route's runtime. The third stage asks how far a fix can go: a zero-upstream-dependency wat post-processing pass (28 byte-identical comparisons across 4 programs × 7 variants, zero false positives, 7.3× on the benchmark) is followed by a direct patch to the upstream `perry-codegen-wasm` emission sites, yielding **122.112 ms → 3.891 ms (31.4×)**, past the equivalence hand-specialization ceiling of 17.185 ms and close to the fully unboxed 3.325 ms.
+The exploration has three stages. The first establishes feasibility: perry's Rust runtime is compiled as a standalone `#![no_std]` wasm module, linked with the application module through WAMR's multi-module mechanism; all 211 `rt.*` imports of the application are supplied by that module, 13 with real implementations and 198 with compile-time-generated trap stubs. All six demo steps pass, with byte-identical output against perry's bundled JavaScript host layer. The second stage locates the cost: six execution routes run the same `src/bench.ts` (fib(29) plus a 10⁶-iteration loop), and the total slowdown is factored **multiplicatively** into an engine factor and a codegen factor with closure checks (error below 5%). A hand-written "clean" wasm isolates the engine; V8's TurboFan steady state and QuickJS provide independent cross-validation. The engine is not at fault: clean wasm under WAMR AOT runs at native speed (0.97×), while the root cause is type erasure in perry's wasm codegen, which forces `+` and conditions across a dynamic-dispatch bridge whose function body accounts for 95.8% of the AOT route's runtime. The third stage asks how far a fix can go, building on that finding: a zero-upstream-dependency wat post-processing pass (28 byte-identical comparisons across 4 programs × 7 variants, zero false positives, 7.3× on the benchmark) is followed by a direct patch to the upstream `perry-codegen-wasm` emission sites, yielding **122.112 ms → 3.891 ms (31.4×)**, past the equivalence hand-specialization ceiling of 17.185 ms and close to the fully unboxed 3.325 ms.
 
 **Keywords:** WebAssembly; TypeScript compiler; runtime modularization; performance attribution; type specialization; WAMR
 
@@ -52,8 +52,11 @@ perry 的 wasm 后端让这条路看上去可行，但产物形态马上带出�
 
 RQ2 是关键。若运行时只能由宿主逐个实现，"到处运行"就退化成"到处写一套运行时"，源码保护的收益也跟着稀释：分发物从源码换成字节码，运行时那一摊照旧。RQ1 要简单些，但答案打了折扣，见 3.1 与 8.4。
 
+本文的论点先摆在前面：这条路可行不可行、慢不慢，可以分开测量；代价拆成引擎与 codegen 两部分，换到 AOT 后引擎那部分归零，剩下的几乎全在 codegen 产出的指令形态上——不在 WebAssembly、也不在引擎。路线图也由此清楚——第 3 章先把它跑通，第 4 章量代价，第 5 章把代价拆到可闭合校验，第 6 章回到源头修，第 7–8 章给边界与效度威胁。每一步的数字都带测量口径，凡材料标为推断的，本文保留同等标注。
+
 ### 1.3 本文的贡献
 
+下面五条按探索顺序排列：1–2 跑通，3–4 量代价与归因，5 修复。
 1. **一条已跑通的架构路线**：把 perry 的 Rust 运行时按 wasm 目标编译成独立模块，与业务模块由 WAMR 多模块机制链接，宿主只剩 WASI 的一个调用（3.2–3.4）。`rt.*` 的调用约定、业务代码、codegen 均未改动。
 2. **一套 `rt.*` ABI 的逆向方法**：在没有规范、但有可运行参考实现时，把参考实现当 oracle 插桩，而不是读源码猜（3.3）。
 3. **一套可复用的性能归因方法学**：把总倍数拆成乘性因子、用干净对照 wasm 隔离引擎、做闭合校验、再用独立引擎交叉验证（第 5 章）。它不停在"wasm 比原生慢 N 倍"这一步，而要拆出这 N 倍里哪一部分属于引擎、哪一部分属于 codegen。
@@ -87,7 +90,7 @@ WASI 在本探索里的作用压到最小：运行时模块不带 libc，标准�
 
 ### 2.3 相关工作定位
 
-本文不引外部文献，这里只交代技术坐标系。放置运行时有三条路：留给宿主（perry wasm 后端的默认形态）、静态链进同一模块（perry native 后端，以及 wasm 侧尚未实施的"路线二"）、编成独立 wasm 模块交由多模块机制链接（本文路线三）。Component Model 能给出第四种更干净的表达（用 WIT 声明 `rt` 接口），但它与本文"f64 位模式 + 线性内存槽位"的零拷贝约定冲突，且 WAMR 侧支持较弱，本探索未实施。
+本文不引外部文献，这里只交代技术坐标系。放置运行时有三条路：留给宿主（perry wasm 后端的默认形态）、静态链进同一模块（perry native 后端，以及 wasm 侧尚未实施的"路线二"）、编成独立 wasm 模块交由多模块机制链接（本文路线三）。Component Model 能给出第四种更干净的表达（用 WIT 声明 `rt` 接口），但它与本文"f64 位模式 + 线性内存槽位"的零拷贝约定冲突，且 WAMR 侧支持较弱，本探索未实施。坐标既定，下面把第三条路接成一条能跑的链路，路上的限制一并记下。
 
 ---
 
@@ -223,6 +226,8 @@ execute _start: Exception: unreachable
 
 ### 3.6 实施中记录在案的七个坑
 
+下面七个坑按发现顺序记录；它们的修法多沉淀成了后面的构造约束。
+
 | # | 现象 | 根因与修法 | 备注 |
 |---|---|---|---|
 | 1 | `rt.string_new` 按 `u32,u32` 声明与业务模块 `(i32,i32)` 签名对不上 | 曾需 `wasm-abis=3`；仓库现无该痕迹，签名对齐靠 Rust 类型本身（`string_new` 用 `u32`，其余桥用 `i64` 传 NaN-box 值） | [INFERENCE] |
@@ -239,7 +244,7 @@ execute _start: Exception: unreachable
 
 ## 4. 性能评估方法学
 
-架构跑通之后，下一个问题必然是"代价是多少"。本章的组织顺序与常见的基准章节相反：先说对照怎么设计、测量纪律如何，再给结果，最后讲**我们如何审计自己的基线**。第三步产出了全篇影响最大的一次修正。
+架构跑通之后，下一个问题必然是"代价是多少"。本章的组织顺序与常见的基准章节相反：先说对照怎么设计、测量纪律如何，再给结果，最后讲**我们如何审计自己的基线**。第三步产出了全篇影响最大的一次修正——它没有改任何数字，只改了数字的读法。
 
 ### 4.1 基准程序与六路对照
 
@@ -376,7 +381,7 @@ IPC 3.8 对简单整数短依赖链合理。若 gcc 跨 `printf` 合并了两次
 
 ### 5.1 问题：一个总倍数解释不了任何事
 
-A 路 2470.678 ms ÷ C 路 1.406 ms = 1757×。这个数字本身没有信息量：引擎代差、编译器产出的指令形态、桥接实现效率全混在里面。若据此说"wasm 比原生慢 1757 倍"，读者自然读成"wasm 不行"，真实情况却可能是"某个编译器的某个后端没做特化"。归因要做的就是把这句话拆开。
+A 路 2470.678 ms ÷ C 路 1.406 ms = 1757×。这个数字本身没有信息量：引擎代差、编译器产出的指令形态、桥接实现效率全混在里面。若据此说"wasm 比原生慢 1757 倍"，读者自然读成"wasm 不行"，真实情况却可能是"某个编译器的某个后端没做特化"。归因要做的就是把这句话拆开——拆到每一步都能被独立证据按住。
 
 ### 5.2 乘性分解与闭合校验
 
@@ -463,12 +468,15 @@ $$\text{总倍数} = \underbrace{\frac{\text{干净 wasm} \times \text{引擎}}{
 > 一个纯解释器（QuickJS 解释 JS，fib 每层 37 ns）比 WAMR AOT 执行 perry 装箱字节码（每层 2 桥 × 26.8 ns + fib 本体 ≈ 55 ns）还快。
 
 QuickJS 是"无桥的慢解释器"，E 是"有桥的机器码"，桥税 25.4 ns/次已经超过 QuickJS 解释一层 fib 除调用外的全部开销。这也解释了 B 路（V8 JS 宿主桥 0.39 µs/层）与 F 路的差距：JS 宿主桥比 wasm 桥再慢一个数量级。
+这正是反转所在：解释器跑赢机器码，差就只能差在桥上。
 
 三个引擎、三种实现路径指向同一结论，本文据此认为归因是稳健的：**引擎无过，根因在 perry wasm codegen 的类型擦除。**
 
 ---
 
 ## 6. 两种修复与其验证
+
+第 5 章把差距钉在了"codegen 发射出的指令形态"上——`+` 与条件判定被强制过桥。本章回到发射点，先划清哪些算"过桥"、哪些本就必须过桥，再试零上游依赖的后处理与上游发射点特化两条修法，并交代它们各自的天花板。
 
 ### 6.1 问题定位：可内联的算术被强制过桥
 
@@ -679,6 +687,8 @@ fib 热路径上，`if (n < 2)` 由 `mem_call_i32(is_truthy)` 变成 `i64.ne TAG
 
 **核心回答**：不改 perry 上游，能把 122 ms 拉到 ≤20 ms 量级（16.0–17.0 ms，即 B2 上界水平），最小手段是单个 wat→wat 后处理 pass，接在既有 E 路链路的 `patch_merged` 之后、`wasm-as` 之前，构建链只多一行命令；代价是约 10 小时一次性投入加随 perry 版本回归的风险。改了上游，则直接到 3.891 ms，此时后处理 pass 可以整体退役：codegen 发射点特化是"源头修"，产物更紧，且不依赖 wat 后处理基础设施。
 
+修完了，还剩两个问题：这些修复能撑多久、随上游演进要付多少代价（第 7 章），以及上面的结论有多可信、覆盖到哪为止（第 8 章）。
+
 ---
 
 ## 7. 工程化可复用性讨论
@@ -773,6 +783,8 @@ SKIP 的对照实验是：同一探针换用**基线**绑定走 E 路，报错�
 
 ## 8. 局限与效度威胁
 
+第 7 章回答了"能撑多久"；本章回答"结论可信到哪一步、覆盖到哪为止"。下面六节按基准覆盖、测量噪声、口径、语言子集、上游变动、推断性数字逐项列出威胁。
+
 ### 8.1 基准只覆盖一种负载
 
 全文的性能结论都建立在单个基准上：`fib(29)` 加 10⁶ 次求和循环。这是**调用密集的最坏情形**，把跨边界调用成本放到最大；因此文中所有"倍数"都该读作这一形态下的倍数，而不是 wasm 路线的普遍性能。
@@ -835,6 +847,8 @@ perry 的行号与内部结构都在变动。本探索记录到的上游位置�
 修复方面，两条路都走通了并各自量化。零上游依赖的 wat 后处理 pass 把 bench 从 123.1 ms 压到 16.9 ms（快 7.3×），4 程序 × 7 变体共 28 次逐字节一致、零误判，代价是约 800 行 JS 与随版本回归的维护负担；它的天花板是方法固有的：类型知识在模块里不可恢复时只能保守拒绝（`probe_nested` 保守模式 43% 对 `--closed-world` 86%）。上游 patch 改 `perry-codegen-wasm` 的两个发射点并加一份保守类型事实，把 122.112 ms 降到 **3.891 ms（快 31.4×）**，跨过手工特化上界 17.185 ms，逼近全去盒的 3.325 ms，且 `demo.sh` 6/6、探针逐字节一致。它比手工特化还快 4.4× 的原因，是整条帧建立与内存槽往返都不再发射，而不只是替换了桥调用本身（该归因标注为推断）。
 
 方法学上改动最小的一步是**审计自己的基线**。质疑"1.471 ms 物理上不可能"时，正确的回应不是复测一遍，而是查清 1,664,079 次逻辑调用里只有 91,759 次真实 call（gdb 断点与 callgrind 双证）。这条修正没有改变任何数字，只改变了 1757× 的解释方式：基准里的"调用次数"未必是硬件看到的调用次数。
+
+回到开头的论点：这条路可行不可行、慢不慢，可以分开测量；代价拆成引擎与 codegen 两部分，换到 AOT 后引擎那部分归零，剩下的几乎全在 codegen 产出的指令形态上。要把它消掉，办法不在运行时这一侧，也不在引擎，而在编译器发射指令的那一步——这正是 6.3 的 patch 走过的路。
 
 ---
 
