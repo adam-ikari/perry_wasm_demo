@@ -1,4 +1,4 @@
-# 归因分析复现指南 (tools/attribution/)
+# 性能分析复现指南 (tools/attribution/)
 
 目的：把 A 路 2726× / B 路 842× 拆成乘性因子。全部命令在项目根目录执行。
 
@@ -106,7 +106,7 @@ $WABT/wat2wasm --enable-all tools/attribution/nohost_box_app.wat -o build/nohost
 ./build/aot_time build/fib_only.aot 5 | grep RUN          # 纯机 fib ≈ 1.3 ms (闭合用)
 ```
 
-## 结果 (2026-09-19 实测，详见 docs/performance.md 归因分析节)
+## 结果 (2026-09-19 实测，详见 docs/performance.md 性能分析节)
 
 | 测量 | P50 | 说明 |
 |---|---:|---:|
