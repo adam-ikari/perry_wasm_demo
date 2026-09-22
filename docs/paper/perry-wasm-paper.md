@@ -202,8 +202,7 @@ func[1] sig=2 <rt.console_log> <- rt.console_log
 
 211 个导入均绑定于 `rt` 模块。也就是说，宿主要让它运行，就必须将这 211 个函数全部提供，哪怕真正会被调用的只有三个。
 这 211 个不是按程序需要声明，而是 perry 一次铺开的固定接口面——任何
-perry 编译的 wasm 都带这套导入，与程序用没用无关（`docs/perry-wasm-wamr.md`：
-"perry 把整个运行时接口一次性声明进去，不管你的程序用不用"）。其能力按
+perry 编译的 wasm 都带这套导入，与程序用没用无关。其能力按
 导入名前缀分布，下面是 198 个桩的逐族计数（来源 `build/rt_symbols.rs`，
 即 `tools/gen-rt-symbols.mjs` 从导入段生成的符号表）：
 
@@ -324,8 +323,8 @@ WASI（preview1）是系统调用级接口——`fd_write`、`clock_time_get`、
 `random_get`、`path_open`，形态统一成"(指针, 长度, …) → errno"，操作对象
 是字节缓冲与资源句柄。`rt.*` 给的是**语言运行时**：字符串表、NaN-boxed 值
 的编解码、对象/数组的 handle store，外加一个按名字动态分派的 `mem_call`
-入口。WASI 里既没有"字符串"这个概念，也没有堆对象、属性与原型链
-（`docs/perry-wasm-wamr.md` "`rt.*` 为什么不是 WASI" 节）。两处硬冲突：
+入口。WASI 里既没有"字符串"这个概念，也没有堆对象、属性与原型链。
+两处硬冲突：
 其一，211 个签名只描述位宽（`string_len: (i64) -> i64`、
 `console_log: (i64) -> ()`），i64 里装的是 f64 位模式加高 16 位标签，
 wasm 类型系统只看到 i64，看不到"这是字符串 id 还是 number"——WASI 的
@@ -480,7 +479,7 @@ B 与 F 提供**独立引擎**的参照系。F 尤其重要，它刻意避开 wa
 
 ### 4.2 测量纪律
 
-测量口径集中在 `docs/performance.md` 的"测量口径"节。要点如下：
+测量口径的要点如下（CI 环境见附录 F.9）：
 
 - **环境**：AMD Ryzen 7 5800H（8C16T，max 4.47 GHz），24 GiB RAM，Linux 6.17.13-2-pve，
   gcc 11.4.0，Node v24.21.0，rustc 1.95.0，WAMR 2.4.3。
@@ -1109,7 +1108,7 @@ HIR 侧的类型推断（`infer_expr_type` / `infer_binary_type`）现成可调�
 
 ### 7.2 缺口
 
-这一节的判断来自一轮专门的实证评估（`docs/performance.md`「工程化可复用性评估（2026-09-21 增补）」），
+这一节的判断来自一轮专门的实证评估（见 §7.2 以下及附录 F），
 裁定为**有条件可复用**，条件两条：落地前把 `emit/type_facts.rs`（419 行自写数据流）
 换成消费 `perry-hir` 现成的 `HirTypeEnv`/`infer_expr_type`；发射点的改法照原样提 PR。
 
@@ -1201,7 +1200,8 @@ wasm 后端没有任何 `infer_expr_type` 消费者。patch 的价值未被上�
 
 当前 patch 跨过了 B2 天花板，但与干净 i64 wasm（E′ 1.216 ms）之间还有一截，来源是影子栈的内存访问纪律。
 要去掉它，需要把 wasm 后端的值表示与调用纪律整体改为 typed。
-这是已规划的"路径 4"，其六阶段方案见 `docs/typed-abi-migration.md`：
+这是已规划的"路径 4"，其六阶段方案如下（详细改动、风险与回退、
+上游行号索引见附录 G）：
 
 | 阶段 | 内容 | 验收 P50 | 人日 |
 |---|---|---:|---|
@@ -1254,9 +1254,11 @@ patch 对 `compile.rs` 两处 `current_mod_idx` 的**替换式**改法会删掉 
 这类"本仓恰好不触发"的缺陷说明：单 module 基准不能替代多 module 回归测试。
 
 上面的分析自己给出了限定词：优化前的 79×/253× codegen 因子等于"可内联而未内联的算术/条件走桥接路径（缺陷，可修复）"、
-"桥接实现低效（nameId 线性扫描，实测值 34×，见 `docs/performance.md` 性能分析第 3 点）"、
+"桥接实现低效（nameId 线性扫描，实测值 34×，见 §5.2）"、
 "NaN-box 指令形态"三者的乘积；
-其中"必要跨边界"（字符串、console 等）的成本不含在这三个因子里，基准未覆盖这类负载，对字符串密集负载应理解为"必要的跨边界成本加同样的实现低效"。
+其中"必要跨边界"（字符串、console 等）的成本不含在这三个因子里，
+基准未覆盖这类负载，对字符串密集负载应理解为"必要的跨边界成本
+加同样的实现低效"。
 
 这一缺口在 6.2 得到部分弥补：`probe_str.ts`（字符串密集）与 `probe_mixed.ts`（混合类型）进入了泛化验证，
 收益分别是 2.0× 与 3.6×。但它们只用于验证 pass 的覆盖率与误判，没有被纳入第 4、5 章的乘积分解矩阵。
@@ -1372,16 +1374,11 @@ typed ABI 规划文档也说明其全部 file:line 已对 `/tmp/perry-src` HEAD 
 
 **仓库内材料**
 
-- `docs/perry-wasm-wamr.md` —《把 TypeScript 编译成 wasm，
-  塞进 WAMR 里跑起来》架构与 ABI 逆向记录（258 行）。
-- `docs/performance.md` —《perry wasm demo 性能基准》六路基准、性能分析、基线审计、修复路径与天花板、
-  工程化可复用性评估（1267 行）。
-- `docs/process.md` —《从 C 桥接到 wasm 运行时：实施过程记录》背景、决策、实施步骤、踩坑、验证与后续增补（544 行）。
-- `docs/typed-abi-migration.md` —《路径 4：perry-codegen-wasm typed ABI 化 + 去影子栈 —
-   实施规划》（397 行）。
+以下材料的内容已整合进本文正文及附录（附录 C–G），原文件随之删除。
+
 - `README.md` — 项目总览、目录结构、实测输出、互操作约定与约束。
-- `tools/attribution/README.md` — 性能分析复现指南、实验文件清单与结果表。
 - `tools/attribution/patch_notes.md` — 上游 patch 的设计说明、逐处语义与等价性论证、实测结果与遗留风险。
+- `tools/attribution/switch_recon/` — 编译开关侦察记录（见附录 F.11）。
 - `src/bench.ts` — 基准程序（20 行）。
 
 **上游仓库与产物**
@@ -1703,3 +1700,372 @@ mem_call_i32(nameId: i32, argc: i32, base: i32) -> i32
 - 字符串密集负载在 A/E 两路中的占比。
 - B 路 364× 内 codegen 形态与 JS 宿主层的相对占比。
 - minhost（JS 最小桩跑 perry wasm）实验因桩语义复杂超时放弃。
+
+---
+
+## 附录 F 实施过程与工程细节
+
+本附录整合实施过程中的工程细节、踩坑与过程性记录，
+正文已引用但未展开的内容集中在此。
+
+### F.1 typerry npm 包安装与 CLI 问题
+
+`npm i @typerry/node` 装到的是 0.0.3。
+napi-rs 的套路是主包 + 平台包分离，0.0.3 的 `optionalDependencies`
+点名了六个平台包，但 registry 上只有 `@typerry/node-linux-x64-gnu@0.0.2`，
+0.0.3 的平台包 404。主包自己不带 `.node` 文件，是空壳。
+
+降到 0.0.2 两个包都能装上。判断方法：`npm view` 主包看
+`optionalDependencies`，再逐个 `npm view` 平台包。
+
+CLI 也有问题：`typerry input.ts --bare` 输出为空、退出码 0。
+`main.js` 靠 `process.argv[1]` 与 `import.meta.url` 比对来判断
+"是直接执行还是被当库引入"，而 `node_modules/.bin/typerry`
+是软链，两边路径对不上，CLI 主体根本不执行。
+直接 `node node_modules/@typerry/node/main.js` 可绕过，
+但用库 API 更干净：
+
+```js
+import { wasmBare, wasmBoot } from '@typerry/node';
+const wasm = wasmBare(source);              // 裸 wasm
+const ref  = wasmBoot(source, '', true);    // wasm + JS 宿主层
+```
+
+`wasmBoot` 产出的 112 KB JS 宿主层后成为 ABI 逆向的 oracle
+（见 §3.3）。
+
+typerry 的 `Cargo.toml` 只依赖 perry-hir / perry-codegen-js /
+perry-dispatch——不依赖 perry-codegen。即 wasm 后端不需要 LLVM
+（四个内部 crate：parser / hir / codegen-wasm / codegen-js）。
+
+### F.2 路线一 C 桥接的工程细节
+
+路线一（探针，已废弃为历史背景）用 `iwasm --native-lib` dlopen
+`libperry_rt.so`。两个坑正文 §3.6 未收录（它们属于路线一而非路线三）：
+
+1. **导出符号**：iwasm 默认不导出自己的符号，dlopen 进来的 `.so`
+   一调用 `wasm_runtime_set_exception()` 就挂。构建 iwasm 时需加
+   `-Wl,--export-dynamic`：
+
+```bash
+cmake -S .../product-mini/platforms/linux -B .deps/wamr-build \
+  -DWAMR_BUILD_INTERP=1 -DWAMR_BUILD_FAST_INTERP=1 \
+  -DWAMR_BUILD_AOT=0 -DWAMR_BUILD_JIT=0 \
+  -DCMAKE_EXE_LINKER_FLAGS="-Wl,--export-dynamic"
+```
+
+2. **`WASMExecEnv` 不是公开类型**：原生函数第一个参数是 exec env，
+   WAMR 文档写作 `wasm_exec_env_t`（公开 typedef），而 `WASMExecEnv`
+   只存在于内部头文件。照写 `WASMExecEnv *exec_env` 则 gcc 报
+   `unknown type name`。原生函数签名约定：第一个参数固定是 exec env，
+   其后与 wasm 导入签名一一对应；`NativeSymbol` 的 signature 字符串
+   （`"(II)i"`，`I`=i64、`i`=i32、`F`=f64）填 NULL 跳过校验，
+   填了则 WAMR 拿它跟 wasm 导入类型比对。
+
+### F.3 runtime-wasm 构建配置
+
+`runtime-wasm/` 的构建细节：
+
+```
+runtime-wasm/
+├── Cargo.toml          # cdylib, opt-level=s, lto=true, panic=abort, strip
+├── src/lib.rs          # #![no_std], 620 行
+└── .cargo/config.toml  # wasm32-unknown-unknown 链接参数
+```
+
+- `Cargo.toml`：`crate-type = ["cdylib"]`；release 用
+  `opt-level = "s"` + `lto = true` + `panic = "abort"`
+  + `codegen-units = 1` + `strip`，压体积。
+- `lib.rs` 顶部：`#![no_std]`，自定义 `panic_handler` → `trap()`
+  （`unreachable`），`mem_ptr`/`mem_bytes` 用线性内存偏移当指针。
+- `.cargo/config.toml`：`--global-base=2097152` 把运行时自己的
+  data/bss/stack 放到 2 MiB 以上，避免与业务模块在 0 附近的 data 段、
+  以及向下生长的栈重叠；`--initial-memory=4194304`（64 页）预留内存；
+  `--no-entry` + `--export-dynamic` 导出全部符号。
+
+### F.4 13 个 Rust 导出函数的签名
+
+附录 C 已列导出名，此处补 Rust 侧实现签名与内部机制：
+
+| 导出名 | Rust 签名 | 用途 |
+---|---|---|
+| `string_new` | `rt_string_new(offset: u32, len: u32)` | 注册字符串字面量 |
+| `console_log`/`warn`/`error` | `rt_console_*(value: i64)` | 打日志（fd 1/2） |
+| `string_concat` | `rt_string_concat(lhs: i64, rhs: i64) -> i64` | 字符串拼接 |
+| `js_add` | `rt_js_add(lhs: i64, rhs: i64) -> i64` | `+`（含字符串） |
+| `string_eq` / `js_strict_eq` | `rt_*(lhs, rhs) -> i32` | 相等比较 |
+| `is_truthy` | `rt_is_truthy(value: i64) -> i32` | 真值判断 |
+| `string_len` | `rt_string_len(value: i64) -> i64` | `.length`（UTF-16 码元数） |
+| `jsvalue_to_string` | `rt_jsvalue_to_string(value: i64) -> i64` | 转字符串 |
+| `mem_call` | `rt_mem_call(name_id, argc, base: u32) -> f64` | 动态分派 |
+| `mem_call_i32` | `rt_mem_call_i32(...) -> i32` | 同上，结果直接 i32 返回 |
+
+动态分派：`BRIDGES` 常量表（10 个名字）按下标匹配，参数以 u64 槽位
+写在业务线性内存 `base` 处（`mem_ptr::<u64>(base + i*8)` 读
+`u64::from_le`），结果写回 `base`。查不到名字走
+`perry_rt_unimplemented` 路径。另有 `_initialize`（reactor 入口，
+WAMR 对带 WASI 导入的模块要求导出，这里无事可做）。
+
+桩由 `tools/gen-rt-symbols.mjs` 从 `build/app.wasm` 导入段生成
+`build/rt_symbols.rs`（`lib.rs` 末尾 `include!` 引入），
+这是**编译期就定死的桩函数，不是运行时查表**——wasm 链接是声明级的，
+211 个导入必须全部有主。
+
+### F.5 nameId 缓存直查的实现
+
+§4.4 提及的 nameId 缓存（2026-09-19 采纳）的实现细节（仅
+`runtime-wasm/src/lib.rs`，最小 diff）：
+
+- 新增 `static mut NAME_CACHE: [u8; 64]`（0xFF = 未缓存）。
+- `invoke()` 在参数填充后加 nameId < 64 的缓存直查 fast path；
+  按名扫描命中时回填缓存。
+- 头注释加一行优化说明。产物尺寸 16798 → 16928 B（+130 B）。
+
+### F.6 demo.sh 六步与 perry_link.c 结构
+
+`demo.sh` 六步：
+
+| 步 | 内容 |
+---|---|
+| 1/6 | 依赖：`@typerry/node`（napi 绑定）、wasm32 target、WAMR 2.4.3 |
+| 2/6 | TS → `build/app.wasm`；同一源码走 perry JS 宿主层 → 参照输出 |
+| 3/6 | `gen-rt-symbols.mjs` 生成桩表 → `cargo build` → `build/rt.wasm` |
+| 4/6 | `patch-app-memory.mjs` → `build/app_link.wasm`；gcc 编宿主 runner |
+| 5/6 | 跑 `perry_link`，与参照输出逐字节比对 |
+| 6/6 | 负向：数组程序应报未实现且退出码非 0 |
+
+`host/perry_link.c` 的 main 只做四件事：
+1. `wasm_runtime_load(rt.wasm)` → `wasm_runtime_register_module("rt", rt)`：
+   业务模块的 212 个导入（211 函数 + memory）按这个名字解析；
+2. `wasm_runtime_set_wasi_args(rt, …)`：rt 用 `fd_write` 打日志，WASI 落到 stdio；
+3. `wasm_runtime_load(app_link.wasm)` → `wasm_runtime_instantiate`：
+   WAMR 一并实例化它依赖的 `rt` 模块并完成符号/内存链接；
+4. `wasm_application_execute_main` 跑 `_start`。
+**没有任何一行 `rt.*` 的实现**——这是和路线一最本质的区别。
+
+### F.7 E 路构建命令
+
+wamrc（AOT 编译器）单独构建：
+`cmake -S .deps/wamr/wamr-compiler -B /tmp/wamrc-test
+-DWAMR_BUILD_WITH_CUSTOM_LLVM=1` + `cmake --build`——wamrc 只需
+LLVM 的 x86_64 后端（wasm→机器码走 WAMR 自研后端），系统
+`llvm-14-dev` 即可，无需 README 推荐的 `build_llvm.sh` 自编全量 LLVM。
+
+### F.8 审计过程记录
+
+§4.4 与 §5.4 的审计在执行中遇到的具体障碍：
+
+- **callgrind 不可用于解释器构建**：解释器构建含 `wrgsbase`
+  （fsgsbase）指令，VEX 3.18 未实现 → SIGILL。A/A' 路的动态指令数
+  无法用 callgrind 直接测，wasm 路每语义步指令数 vs 原生的直接比值
+  为推断（见附录 E #3）。
+- **gdb 断点统计不可行**：D 路的 fib 真实调用次数统计，gdb 12.1
+  PIE 断点 400 s 未达 1.66 M 命中且 gdb 内部错误；10 Ir/逻辑调用
+  由 callgrind 总量 16,640,768 Ir ÷ 1,664,079 次闭合推得。
+
+### F.9 CI 环境与回归判定
+
+`.github/workflows/bench.yml` 在 GitHub Actions（ubuntu-22.04，
+LLVM 14，与本文基线机同系）上复现六路基准，触发方式为手动
+`workflow_dispatch` 或 PR 打 `bench` 标签（不随 push 自动跑）。
+本机全部数值（PVE 虚拟机 / Ryzen 7 5800H / 噪声 ±15%）是
+**历史基线**；CI runner CPU 型号不同、是共享虚拟机（噪声远大于
+本机），**绝对毫秒不可跨机比较**。CI 的回归判定只用「各目标 ÷ C
+原生」的**倍数**与本文基线对照（±50% 提示性 warning、不 fail），
+结果写入 `build/bench-results.json`（`tools/ci/collect-bench.mjs`
+汇总）并上传 artifact。CI 首次运行即建立 CI 基线（存档于 artifact
+的 `ci_baseline` 字段）；后续可用
+`node tools/ci/collect-bench.mjs --baseline <上一次 json>` 做
+CI-vs-CI 漂移比较。
+
+### F.10 过程性事实记录
+
+实施中发现的三条事实性记录：
+
+1. **编辑器事故**：`src/bench.ts` 曾丢失 `const f = fib(N_FIB)` 一行，
+   导致 WAMR 路打印 `fib(29) = undefined`（f 未定义），字面量拼接探针
+   则正常。排查中排除过 rt.wasm 桩表与 codegen 路径，确认是源码编辑
+   问题。教训：A/B/C 输出一致性校验（`bench.sh` 第 2 步）必须先于计时。
+2. **gcc -O2 会把整个基准常量折叠**：初版 `bench_native.c` 直接用
+   `#define` 常量，实测 0.002 ms（折叠后只剩 printf）；改经 `volatile`
+   指针读入 N_FIB/N_LOOP 后得到真实的 1.5 ms。**原生基线必须反折叠**，
+   否则倍数会虚高 3 个数量级。
+3. **WAMR 解释器单步开销 ~1.3–1.9 µs**：循环 10⁶ 次累加单独
+   ≈ 1864 ms（1.86 µs/迭代）；fib 部分 ≈ 4010 − 1864 = 2146 ms
+   / 1664079 次调用 ≈ 1.29 µs/调用。简单递归调用比循环体还便宜一点
+   [INFERENCE：探针程序未入库，由总耗时减法换算]。
+
+### F.11 开关侦察
+
+逐项实测 perry CLI / 环境变量 / `@typerry/node` / wamrc 全部性能开关。
+perry CLI / `@typerry/node` / 环境变量（`--target wasm|web`、
+`--minify`、`--fast-math`、`--march=*`、`--no-auto-optimize`、
+`PERRY_TARGET_CPU`、`PERRY_PRECOMPILE`）**产出字节完全相同的 wasm**
+（md5 `af3e4dd7…`，9827 B）——"调开关"这条路不存在。
+wamrc 侧唯一有效的是 `--enable-segue`（配 `--target=x86_64
+--disable-llvm-jump-tables`）：122.14 → 99.84 ms（−18.3%），仍 71×
+于原生，且被通用桥内联 pass 覆盖（桥接调用没了，segue 无收益）。
+其余开关无效或更差（`--opt-level=0` 灾难 3.2×、`--enable-shared-heap`
++29%、`--enable-llvm-pgo` 因缺 `WAMR_BUILD_STATIC_PGO=1` 无法闭环
+未验证）。详见 `tools/attribution/switch_recon/`。
+
+### F.12 OS 强耦合模块裁剪细节
+
+§3.2 提及运行时的 OS 强耦合模块需裁剪。具体：`perry-runtime` 里的
+`fs`/`dns`/`dgram`/`child_process`/`cluster`/`net`/`atomics`+`futex`
+/`macos_bundle` 这些 OS 强耦合模块，wasm 目标要么走 WASI
+（socket 还在提案），要么不编进去——这部分任何方案都省不掉。
+分配器不受影响（mimalloc 受 `#[cfg(target_pointer_width = "64")]`
+限制，wasm32 自动落回系统分配器）。裁剪机制现成：perry 的
+auto-optimize 已会按程序实际用到的特性重建运行时子集
+（`optimized_libs.rs`），wasm 化无非加一个 wasm 目标预设。
+
+---
+
+## 附录 G typed ABI 迁移规划详细方案
+
+§7.3 给出六阶段方案摘要。本附录补充各阶段的详细改动点、上游
+file:line 索引、风险与回退策略、以及每阶段验收标准。
+
+### G.1 各阶段详细改动
+
+**阶段 0：装配 HIR 类型环境**
+在 `WasmModuleEmitter::compile`（`emit/compile.rs:9`）入口、遍历
+modules 前（约 `:560`），对每个 module 调
+`HirTypeEnv::from_module(&module)`（`perry-hir/src/analysis/
+value_types.rs:222`），把 env 挂到 `WasmModuleEmitter`
+（`emit/module_emitter.rs:11`）；`FuncEmitCtx`
+（`emit/func_emit_ctx.rs:11,44`）透传 env 引用给发射点。
+纯装配，不改变任何发射指令。验收 P50 ~122 ms（无回归）。
+风险：低。env 为 owned（from_module 返回 Self），FuncEmitCtx
+借用引用即可。
+
+**阶段 1：发射点特化（= 路径 3 完整，锚定 B2）**
+- `+`（`emit/expr/literals_vars.rs:176–184`，当前无条件
+  `emit_memcall("js_add")`）前置分支：`infer_expr_type(left)` 与
+  `infer_expr_type(right)` 均 number-like → 复用 `:219–240` 已存在的
+  pure-numeric 内联模式；否则原 `js_add` 桥。
+- 条件 is_truthy（`emit/stmt.rs:68–69` if / `:113–114` while /
+  `:165–166` do-while / `:225–226` for）：条件可证 `Type::Boolean`
+  → 内联 `I64Ne(TAG_FALSE)`；**number 条件保守回退**（0/−0/NaN
+  均 falsy，NaN-box 位型中不可裸 `i64.ne 0`）。
+- （可选）Eq/Ne（`literals_vars.rs:249–285`）：两侧可证 number
+  → `F64Eq`/`F64Ne`；否则原桥。
+验收 P50 ~17.2 ms（±20%）。风险：中。回退路径保证行为不变
+（类型不证→原桥）。
+
+**阶段 2：字面量与局部 typed**
+- 字面量（`literals_vars.rs:15–18`）：消费上下文可证 i32 时发
+  `I64Const(INT32_TAG<<48 | i32)`（`INT32_TAG=0x7FFE`，需在
+  `emit/constants.rs:27–31` 补常量）；number 算术上下文保持裸 f64
+  位模式。
+- 局部（`emit/function.rs:49`）：当前 `locals = vec![(extra+3, I64),
+  (1, I32)]` 全 I64；改为依 `HirTypeEnv.locals` + 声明类型，
+  可证 Int32→I32 槽、Number→F64 槽，其余 I64。
+验收 P50 ~12–17 ms [INFERENCE]。风险：中。INT32_TAG 跨桥编码：
+rt decode 不认 0x7FFE——限定 INT32_TAG 发射在不跨桥上下文，
+或同步 rt decode（归阶段 5 前置）。
+
+**阶段 3：签名 typed + trampoline + 拒绝制**
+- 用户函数签名从 `vec![ValType::I64; n]`（`compile.rs:711–719`）
+  改为依参数类型特化（F64/I32/I1 等）；不支持者（闭包捕获、
+  `call_indirect`、async、类方法 this）保留 I64 签名。
+- 模块边界加 trampoline（I64→typed 转换 + 调 typed 函数体）；
+  同模块 typed 互调直连 raw clone（不经 trampoline）[INFERENCE]。
+- 拒绝制照搬 `crates/perry-codegen/src/codegen/typed_abi.rs:861–908,
+  910–1031`（任一不支持→整体 None，回退通用 ABI）。
+验收 P50 ~12–17 ms [INFERENCE]。风险：中。
+trampoline 经 wamrc 内联后近零开销 [INFERENCE]。
+
+**阶段 4：去影子栈**
+B2 的 fib 体仍含 `(global.set $global$0 ...)` 帧指针操作 +
+`(i64.store (global.get $global$0) ...)` / `(i64.load (global.get
+$global$0))` 溢出对。影子栈发射点分散于 `emit/` 全域——
+`emit/expr/calls.rs`（调用点实参暂存）、`emit/expr/literals_vars.rs`
+（帧 setup/teardown）、`emit/compile.rs`（global sp 声明）。需系统
+定位所有 `global.get/set $global$0` + `i64.store/load` 发射点。
+typed 函数的溢出从 global-sp 内存改为 local；未 typed 的 JSValue
+仍需泛型栈。验收 P50 ~3.3–5.0 ms。风险：高。改动面最大。
+
+**阶段 5：rt.* 桥 typed 重载双轨**
+业务 wasm 的 typed 调用点若直连 typed rt 桥，rt 桥需提供 typed
+重载。**双轨**：旧 i64 JSValue 桥保留作 fallback，新 typed 桥
+（如 `js_add_f64(f64,f64)->f64`）供 typed 调用点直连。三处同步：
+1. 本项目 `runtime-wasm/src/lib.rs`（加 typed 重载导出，与旧桥并存）；
+2. 上游 JS 宿主层 `wasm_runtime.js`（同步加 typed 重载）；
+3. 业务 wasm 导入段（typed 调用点 import typed 桥名）。
+验收 P50 ~3.3 ms。风险：中。双轨兼容 + `gen-rt-symbols.mjs`
+桩表识别 typed 桥名。
+
+### G.2 风险与回退
+
+**Top 3**：
+1. **JS truthiness 边角（阶段 1）**：number 条件不可裸 `i64.ne 0`。
+   回退：第一版 number 条件一律走 `is_truthy` 桥，仅 Boolean 条件
+   内联。行为不变。
+2. **去影子栈的横切改动面（阶段 4）**：值溢出约定是 codegen 全域
+   关注点，回归面大。回退：typed 函数保留影子栈 fallback
+   （即停在阶段 3，P50≈B2=17.2 ms 仍快 7.1×，可发布）；
+   去影子栈仅在 typed raw clone 内做，通用函数不动。
+3. **trampoline 开销与 wamrc 内联不可控（阶段 3）**：wasm 无原生
+   inline 属性，靠 wamrc 启发式；若 trampoline 未被内联，typed 调用点
+   反添开销。回退：trampoline 仅在模块边界/混合调用用，
+   同模块 typed 互调直连 raw clone [INFERENCE]。
+
+**回退总原则**：每阶段保留原 i64/NaN-box 回退路径
+（类型不证→原桥/原签名/影子栈），任一阶段可独立回退到上一可发布
+里程碑（阶段 1 后=B2，阶段 4 后=V3）。
+
+### G.3 上游行号索引表
+
+**wasm 后端发射点**（`crates/perry-codegen-wasm/src/emit/`）：
+
+| 发射点 | file:line | 现状 |
+---|---|---|
+| 编译入口 compile | `compile.rs:9` | `WasmModuleEmitter::compile` |
+| modules 遍历（env 装配点） | `compile.rs:560` | — |
+| 用户函数签名 | `compile.rs:711–719` | `vec![ValType::I64; n]` |
+| 桥 import 声明 | `compile.rs:56,306` | `t_f64_f64_f64` |
+| 函数局部 | `function.rs:49` | `vec![(extra+3,I64),(1,I32)]` |
+| `+`→js_add | `expr/literals_vars.rs:176–184` | 无条件 emit_memcall |
+| pure-numeric 内联（复用） | `expr/literals_vars.rs:219–240` | Sub/Mul/Div |
+| `++`/`--` 内联（复用） | `expr/literals_vars.rs:139–151` | F64Reinterpret+F64Add |
+| Eq/Ne→js_strict_eq | `expr/literals_vars.rs:249–285` | 无条件桥 |
+| Lt/Le/Gt/Ge 内联 | `expr/literals_vars.rs:286–308` | 已内联 F64Lt 等 |
+| 数字字面量 | `expr/literals_vars.rs:11–18` | 一律 f64_const+reinterpret |
+| NaN-box 常量 | `constants.rs:27–31` | 无 INT32_TAG |
+| if 条件→is_truthy | `stmt.rs:68–69` | emit_memcall_i32 |
+| while 条件 | `stmt.rs:113–114` | is_truthy+I32Eqz+BrIf |
+| do-while 条件 | `stmt.rs:165–166` | is_truthy+BrIf |
+| for 条件 | `stmt.rs:225–226` | is_truthy |
+| 调用点装箱/补 undefined | `expr/calls.rs:140–210` | FuncRef→Call(idx) |
+| 桥 import 注册 | `runtime_imports.rs:16`；`string_collection.rs:23` | — |
+
+**类型信息 API**（`crates/perry-hir/src/`）：
+
+| API | file:line | 说明 |
+---|---|---|
+| `Type` 枚举 | `types.rs:22–73` | Number:30、Int32:32、Boolean:28 |
+| `HirTypeEnv` | `analysis/value_types.rs:25–38` | locals/globals/returns |
+| `HirTypeEnv::from_module` | `analysis/value_types.rs:222` | 可现成调用 |
+| `infer_expr_type` | `value_types.rs:551` | `(expr, env) -> Type` |
+| `infer_binary_type` | `value_types.rs:1649–1689` | Add: num+num→Number |
+
+行号锚定于 HEAD `7ac11b09`，不能作为长期稳定坐标。
+
+### G.4 每阶段验收标准
+
+复现工具（均在 `tools/attribution/`，项目根目录执行）：
+
+| 工具 | 用途 | 产出 |
+---|---|---|
+| `aot_e.sh [runs]` | E 路一键复现 | P50 + 输出校验 |
+| `exp_specialize.sh [runs]` | B1/B2/V3 等价手工特化 | B1=71.6/B2=17.2/V3=3.3 ms |
+| `exp_wasmopt.sh [runs]` | wasm-opt 后处理上限 | A5=93.5 ms |
+
+逐字节一致校验（每阶段强制）：`fib(29) = 514229`、
+`sum = 499999500000`。
+`aot_e.sh`/`exp_specialize.sh` 内置校验（`verify()` 函数比对
+`expect` 串）。阶段 1/4 的 `exp_specialize.sh` 是等价手工特化黄金
+（`spec_patch.py` 生成），非上游真实产物；上游改动落地后改用
+`aot_e.sh` 跑真实 perry 产物对照同量级。
