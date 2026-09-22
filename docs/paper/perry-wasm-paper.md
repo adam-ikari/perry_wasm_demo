@@ -1,6 +1,6 @@
 # 把 TypeScript 编译成 WebAssembly 并在无 JS 引擎的宿主上运行
 
-**一次探索：perry 编译为 wasm 的可能性，以及途中发现的性能异常与修复**
+**探索 perry 编译为 wasm 的可能性，以及途中发现的性能异常与修复**
 
 **Compiling TypeScript to WebAssembly and Running It on a Host Without a JavaScript Engine:
 A Systematic Exploration from Runtime Modularization through Performance Attribution to an Upstream Compiler Fix**
