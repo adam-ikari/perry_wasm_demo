@@ -5,7 +5,7 @@
 **Compiling TypeScript to WebAssembly and Running It on a Host Without a JavaScript Engine:
 A Systematic Exploration from Runtime Modularization through Performance Attribution to an Upstream Compiler Fix**
 
-**作者：** perry wasm demo 项目组
+**作者：** Adam
 **日期：** 2026-09-21
 **材料来源：** 本仓库 `docs/`、`tools/`、`src/`、`host/`、`runtime-wasm/` 的一手实测记录；上游仓库 [PerryTS/perry](https://github.com/PerryTS/perry)、[fn-a/typerry](https://github.com/fn-a/typerry)、[bytecodealliance/wasm-micro-runtime](https://github.com/bytecodealliance/wasm-micro-runtime)。
 
@@ -35,7 +35,7 @@ The exploration has three stages. The first establishes feasibility: perry's Rus
 
 ### 1.1 交付 TypeScript 意味着交付源码
 
-TypeScript 编译成 JavaScript 之后仍是可读文本。打包、压缩、要不要附带 source map，只影响读起来的难易，不改变语义的暴露程度。对业务逻辑即核心资产的场景来说，这个问题长期无解：产物即源码。
+TypeScript 编译成 JavaScript 之后仍是可读文本。打包、压缩、要不要附带 source map，影响读起来的难易程度，不改变语义的暴露程度。对业务逻辑即核心资产的场景来说，这个问题长期无解：产物即源码。
 
 编译成原生二进制更彻底，代价也清楚：产物与操作系统、CPU 架构、ABI 绑定，每个组合都须单独构建一份，交叉编译矩阵随平台数量线性膨胀。对第三方分发的库或插件来说，"到处编译"的成本常常高过它换来的收益。
 
