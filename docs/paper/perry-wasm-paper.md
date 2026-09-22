@@ -15,7 +15,7 @@ A Systematic Exploration from Runtime Modularization through Performance Attribu
 
 TypeScript 程序的分发和交付长期等同于交付源码：打包与压缩只增加阅读成本，不改变语义可读性。编译成原生二进制能解决源码外流，却把"一次编写、到处运行"换成"一次编写、到处编译"，交叉编译矩阵随平台数量增长。WebAssembly 提供了第三条路。本文记录一次完整的技术探索：把 perry 编译器产出的 TypeScript→wasm 模块运行在**没有任何 JavaScript 引擎**的宿主上，宿主只保留 WASI 的 `fd_write`。
 
-探索分三段。第一段先解决"能否运行"：把 perry 的 Rust 运行时以 `#![no_std]` 编译成独立的 wasm 模块，由 WAMR 多模块机制与业务模块链接，业务模块的 211 个 `rt.*` 导入全部由该模块提供，其中 13 个真实实现、198 个编译期生成的报错桩；正负向用例 6/6 通过，输出与 perry 自带 JS 宿主层逐字节一致。第二段再解决"慢在何处"：用同一份 `src/bench.ts`（fib(29) 加 10⁶ 次循环）建立六路对照，把总倍数按**乘性因子**分解为「引擎因子 × codegen 因子」并做闭合校验（误差 <5%），用手写"干净对照 wasm"隔离引擎，用 V8 的 TurboFan 稳态与 QuickJS 旁证交叉验证。结论不在引擎一侧：干净 wasm 在 WAMR AOT 下与手写 C 同速（0.97×），根因是 perry wasm codegen 的类型擦除——`+` 与条件判定被改写为桥调用，桥函数体占 AOT 路耗时的 95.8%。第三段据此回到"如何修、修到何种程度"：先做零上游依赖的 wat 后处理 pass（4 程序 × 7 变体共 28 次逐字节一致、0 误判、bench 快 7.3×），再直接修改上游 `perry-codegen-wasm` 的发射点，结果是 **122.112 ms → 3.891 ms（快 31.4×）**，跨过等价手工特化的上界 17.185 ms，逼近全去盒的 3.325 ms。
+探索分三段。第一段先解决"能否运行"：把 perry 的 Rust 运行时以 `#![no_std]` 编译成独立的 wasm 模块，由 WAMR 多模块机制与业务模块链接，业务模块的 211 个 `rt.*` 导入全部由该模块提供，其中 13 个真实实现、198 个编译期生成的报错桩；正负向用例 6/6 通过，输出与 perry 自带 JS 宿主层逐字节一致。第二段再解决"慢在何处"：用同一份 `src/bench.ts`（fib(29) 加 10⁶ 次循环）建立六路对照，把总倍数按**乘性因子**分解为「引擎因子 × codegen 因子」并做闭合校验（误差 <5%），用手写"干净对照 wasm"隔离引擎，用 V8 的 TurboFan 稳态与 QuickJS 旁证交叉验证。结论不在引擎一侧：干净 wasm 在 WAMR AOT 下与手写 C 同速（0.97×），根因是 perry wasm codegen 的类型擦除——`+` 与条件判定被改写为桥接调用（bridge call），桥接函数体占 AOT 路耗时的 95.8%。第三段据此回到"如何修、修到何种程度"：先做零上游依赖的 wat 后处理 pass（4 程序 × 7 变体共 28 次逐字节一致、0 误判、bench 快 7.3×），再直接修改上游 `perry-codegen-wasm` 的发射点，结果是 **122.112 ms → 3.891 ms（快 31.4×）**，跨过等价手工特化的上界 17.185 ms，逼近完全去装箱的 3.325 ms。
 
 **关键词：** WebAssembly；TypeScript 编译器；运行时模块化；性能归因；类型特化；WAMR
 
@@ -59,7 +59,7 @@ RQ2 是关键。若运行时只能由宿主逐个实现，"到处运行"就退�
 下面五条按探索顺序排列：1–2 完成运行验证，3–4 评估代价与归因，5 修复。
 1. **一条已完成运行验证的架构路线**：把 perry 的 Rust 运行时按 wasm 目标编译成独立模块，由 WAMR 多模块机制与业务模块链接，宿主只剩 WASI 的一个调用（3.2–3.4）。`rt.*` 的调用约定、业务代码、codegen 均未改动。
 2. **一套 `rt.*` ABI 的逆向方法**：在没有规范、但有可运行参考实现时，把参考实现当 oracle 插桩，而不是读源码猜（3.3）。
-3. **一套可复用的性能归因方法学**：把总倍数拆成乘性因子、用干净对照 wasm 隔离引擎、做闭合校验、再用独立引擎交叉验证（第 5 章）。它不停在"wasm 比原生慢 N 倍"这一步，而要拆出这 N 倍里哪一部分属于引擎、哪一部分属于 codegen。
+3. **一套可复用的性能归因方法学**：把总倍数拆成乘性因子、用手写的干净对照 wasm 隔离引擎、做闭合校验、再用独立引擎交叉验证（第 5 章）。它不停在"wasm 比原生慢 N 倍"这一步，而要拆出这 N 倍里哪一部分属于引擎、哪一部分属于 codegen。
 4. **对自建基线的自审**：`gcc -O2` 的深度自内联使 1,664,079 次逻辑调用只发生 91,759 次真实 call，审计用 gdb 断点与 callgrind 双证纠正了这一口径错误（4.4）。
 5. **两种修复与其定量验证**：零上游依赖的 wat 后处理 pass（6.2）与上游 codegen 发射点特化（6.3），后者把 AOT 路从 122.112 ms 降到 3.891 ms。
 
@@ -230,7 +230,7 @@ execute _start: Exception: unreachable
 
 | # | 现象 | 根因与修法 | 备注 |
 |---|---|---|---|
-| 1 | `rt.string_new` 按 `u32,u32` 声明与业务模块 `(i32,i32)` 签名对不上 | 曾需 `wasm-abis=3`；仓库现无该痕迹，签名对齐靠 Rust 类型本身（`string_new` 用 `u32`，其余桥用 `i64` 传 NaN-box 值） | [INFERENCE] |
+| 1 | `rt.string_new` 按 `u32,u32` 声明与业务模块 `(i32,i32)` 签名对不上 | 曾需 `wasm-abis=3`；仓库现无该痕迹，签名对齐靠 Rust 类型本身（`string_new` 用 `u32`，其余桥接函数用 `i64` 传 NaN-box 值） | [INFERENCE] |
 | 2 | `perry_rt_unimplemented` 在产物里找不到，桩调用链接失败 | Rust ≥1.70 起 cdylib 只导出 `pub` 的 `#[no_mangle]` 符号；修法 `#[no_mangle] pub extern "C" fn` | — |
 | 3 | 实例化报 `failed to link import memory (rt, memory)`、退出码 1 | 业务模块 import 的 memory `min` 超过 WAMR 对运行时模块记录的有效初始页数；实测 min=1 能过，min=2~100（含 17/18/64）全部失败，故默认 `min=1` | — |
 | 4 | 报 `initializing thread failed!` | 与 `wasm_runtime_set_wasi_args` 调用时机有关；本 WAMR 2.4.3 构建未开 WASI 线程支持，**未复现** | 条件性 |
@@ -244,7 +244,7 @@ execute _start: Exception: unreachable
 
 ## 4. 性能评估方法学
 
-架构验证通过之后，下一个问题必然是"代价是多少"。本章的组织顺序与常见的基准章节相反：先说对照怎么设计、测量纪律如何，再给结果，最后讲**本文如何审计自己的基线**。第三步产出了全篇影响最大的一次修正——它没有改任何数字，只改了数字的读法。
+架构验证通过之后，下一个问题必然是"代价是多少"。本章的组织顺序与常见的基准章节相反：先说对照怎么设计、测量纪律如何，再给结果，最后讲**本文如何审计自己的基线**。这最后一步产出了全篇影响最大的一次修正——它没有改任何数字，只改了数字的读法。
 
 ### 4.1 基准程序与六路对照
 
@@ -277,7 +277,7 @@ console.log("sum = " + sum);
 | E | WAMR AOT | `wamrc` O3，wasm-merge 合并单模块（rt 代码也进机器码） |
 | F | QuickJS | Bellard qjs 解释执行同一算法的 JS 版本 |
 
-各条对照的设计意图有层次：C 给出"这块硬件能有多快"的地板，D 回答"perry 自己的两条后端差多少"，E 回答"换成 AOT 引擎后还剩多少差距"，B 与 F 提供**独立引擎**的参照系。F 尤其重要，它刻意避开 wasm 和桥，只回答一个问题：纯解释器跑同样的算法要多久。
+各条对照的设计意图有层次：C 给出"这块硬件能有多快"的地板，D 回答"perry 自己的两条后端差多少"，E 回答"换成 AOT 引擎后还剩多少差距"，B 与 F 提供**独立引擎**的参照系。F 尤其重要，它刻意避开 wasm 和桥接调用，只回答一个问题：纯解释器跑同样的算法要多久。
 
 ### 4.2 测量纪律
 
@@ -329,7 +329,7 @@ F 路的拆分与倍数：P50 85.532 ms，其中 fib 部分 61.7 ms（37 ns/层�
 
 ### 4.4 对自建基线的审计
 
-结果得出后有一条质疑：原生基线 1.471 ms 在物理上可疑，按 1,664,079 次调用均摊，每层递归只有 0.6–0.9 ns，不可能。这条质疑指向的正是基准方法本身。
+结果得出后有一条质疑：原生基线 1.471 ms 在物理上可疑，按 1,664,079 次调用均摊，每层递归只摊到 0.6–0.9 ns，这在物理上不可能。这条质疑指向的正是基准方法本身。
 
 审计用三条独立证据核查。
 
@@ -344,16 +344,16 @@ F 路的拆分与倍数：P50 85.532 ms，其中 fib 部分 61.7 ms（37 ns/层�
 
 IPC 3.8 对简单整数短依赖链合理。若 gcc 跨 `printf` 合并了两次 fib 调用，每轮指令增量会减半，而实测每轮增量恒为 16.71 M；`fib(29)` 的 1,664,079 次逻辑调用由计数器实证（`fib_count.c`，gcc -O2 下 count = 1,664,079，输出不变）。
 
-**证据三：拆分计时**（`bench_split.c`，gcc -O2）：fib 部分 P50 0.84 ms + 循环部分 0.30 ms ≈ 1.13 ms，与整体 1.47 ms 吻合（差额为两次 `clock_gettime` 与 `printf`）。同型 f64 变体（`bench_f64.c`，与 perry NaN-box 的 f64 位型同语义）P50 2.52 ms；C 基线用 i64 是公平下界，f64 版慢 ~1.8×，量级不变。
+**证据三：拆分计时**（`bench_split.c`，gcc -O2）：fib 部分 P50 0.84 ms + 循环部分 0.30 ms ≈ 1.13 ms，与整体 1.47 ms 吻合（差额为两次 `clock_gettime` 与 `printf`）。同型 f64 变体（`bench_f64.c`，与 perry NaN-box 的 f64 位模式同语义）P50 2.52 ms；C 基线用 i64 是公平下界，f64 版慢 ~1.8×，量级不变。
 
 **结论：计时数字成立，物理矛盾来自 `gcc -O2` 对 fib 的深度自内联。** 1,664,079 次"逻辑调用"只发生 **91,759 次真实 call**，由两个独立实测互相印证：gdb 断点在 warmup+1 个 RUN 上命中 183,519，除以 2 次顶层执行得 91,759；callgrind 调用图上 fib 与内联克隆体 fib'2 的入口合计同为 183,519。`fib_O2.asm` 显示 161 条指令内含 4 个 call 点与 2 个克隆体，平均一次真实 call 覆盖约 18 层逻辑调用。按真实 call 折算：fib 部分 0.84 ms / 91,759 ≈ **9.2 ns/真实 call**（≈27 cycles @3 GHz）。
 
-质疑者的物理直觉用在"真实 call"上完全正确，错在把逻辑调用数当成了真实调用数。这条修正的意义超出这条基线本身：**原生基线执行的动态指令量远少于 wasm 路径在同语义下的指令量**，"1757×"里有一部分是代码形态差异，而不是全部都由解释器与桥的运行时代价构成。归因矩阵已把这一点计入引擎因子的分母一侧（干净 wasm × WAMR 35×），无需改数，但在呈现上必须按因子乘积来读。
+质疑者的物理直觉用在"真实 call"上完全正确，错在把逻辑调用数当成了真实调用数。这条修正的意义超出这条基线本身：**原生基线执行的动态指令量远少于 wasm 路径在同语义下的指令量**，"1757×"里有一部分是代码形态差异，而不是全部都由解释器与桥接调用的运行时代价构成。归因矩阵已把这一点计入引擎因子的分母一侧（干净 wasm × WAMR 35×），无需改数，但在呈现上必须按因子乘积来读。
 
 审计同时记录了两条来自开发过程的教训：
 
 1. **编辑器事故**：基准开发中 `src/bench.ts` 曾丢失 `const f = fib(N_FIB)` 一行，导致 WAMR 路打印 `fib(29) = undefined`，排查中先排除了 rt.wasm 桩表与 codegen 路径，最后确认是源码编辑问题。教训是输出一致性校验必须先于计时。
-2. **`gcc -O2` 会把整个基准常量折叠**：初版 `bench_native.c` 直接用 `#define` 常量，实测 0.002 ms（折叠后只剩 `printf`）；改经 `volatile` 指针读入 `N_FIB`/`N_LOOP` 后得到真实的 1.5 ms。**原生基线必须反折叠，否则倍数会虚高三个数量级。**
+2. **`gcc -O2` 会把整个基准常量折叠**：初版 `bench_native.c` 直接用 `#define` 常量，实测 0.002 ms（折叠后只剩 `printf`）；改经 `volatile` 指针读入 `N_FIB`/`N_LOOP` 后得到真实的 1.5 ms。**原生基线必须防止常量折叠，否则倍数会虚高三个数量级。**
 
 ### 4.5 本轮审计的修正汇总
 
@@ -364,14 +364,14 @@ IPC 3.8 对简单整数短依赖链合理。若 gcc 跨 `printf` 合并了两次
 | B′ 干净 wasm × V8 | 4.9 ms | **3.40 ms**（`--no-liftoff`）；默认 4.67 仍对 | `run_node_steady.mjs` 阶梯预热 |
 | B 路 V8 引擎因子 | ~3.3× | **~2.5×** | 3.40 ÷ 1.471 |
 | B 路 codegen+宿主层因子 | ~253× | **~364×** | 1239 ÷ 3.40 |
-| B 路乘积校验 | 3.3×253 ≈ 835 | **2.5×364 ≈ 910**（误差 <0.1%） | 闭合 |
+| B 路乘积闭合校验 | 3.3×253 ≈ 835 | **2.5×364 ≈ 910**（误差 <0.1%） | 闭合 |
 | D 纯执行 | 无（6.286 进程级） | **1.6–2.6 ms** | callgrind 19.44 M Ir 换算 |
 | D/C（纯执行） | 4.5× | **1.2–1.9×** | 同左 |
 | E/D | 23× | **54–88×**（按 D 纯执行） | 同左 |
 | 合并模块成本 | 未测 | **无额外成本** | 解释器跑合并 2340–2390 vs 双模块 2372–2480 ms |
 | wamrc 优化级 | 声明默认 O3 | **确认默认 O3**，O0 对照 390 vs 141 | `wamrc --help` + 实测 |
 | F 路 QuickJS | 无 | **85.532 ms**（进程级） | `bench_f.sh` 11 轮 |
-| E 路每桥成本 | ~27.5 ns | **rt 函数体 25.4 ns + 装箱税 1.4 ns** | `nohost_box` 隔离实验 |
+| E 路每次桥接调用成本 | ~27.5 ns | **rt 函数体 25.4 ns + 装箱开销 1.4 ns** | `nohost_box` 隔离实验 |
 
 其中"合并模块无额外成本"决定了 E 路的可信度：同一份合并模块输入解释器 iwasm，进程级 real 三测 2390 / 2381 / 2340 ms，双模块同口径 2480 / 2372 ms，`bench_time` 双模块进程内 RUN 2501–2527 ms。合并版不慢于双模块，E 路没有被合并本身高估。callgrind 在这里不可用：解释器构建含 `wrgsbase`（fsgsbase）指令，VEX 3.18 未实现，直接 SIGILL。这处限制与结论无关，但在方法上必须记录。
 
@@ -402,25 +402,25 @@ $$\text{总倍数} = \underbrace{\frac{\text{干净 wasm} \times \text{引擎}}{
 | 成分 | 倍数 | 证据 |
 |---|---:|---|
 | WAMR FAST_INTERP vs 原生（干净代码下） | **~35×** | A′ 干净 wasm 50.8 ms（fib 43.0 + 循环 5.4）÷ 原生同形 1.47 ms（fib 0.967 + 循环 0.50） |
-| perry codegen 差 + rt 桥实现 vs 干净 wasm（同在 WAMR） | **~49×** | A 2470.678 ms（优化后重测）÷ A′ 50.8 ms |
-| **乘积校验** | 35×49 ≈ **1703** vs 实测 1757（误差 3.1%） | 闭合 ✓ |
+| perry codegen 差 + rt 桥接实现 vs 干净 wasm（同在 WAMR） | **~49×** | A 2470.678 ms（优化后重测）÷ A′ 50.8 ms |
+| **乘积闭合校验** | 35×49 ≈ **1703** vs 实测 1757（误差 3.1%） | 闭合 ✓ |
 
-优化前的同一矩阵：codegen 因子 ~79×（A 4010 ms ÷ A′ 50.8 ms），35×79 ≈ 2730 vs 实测 2726（误差 0.2%）。79× → 49× 的差值就是"桥实现低效（按名线性扫描）"的贡献，已在 6.1 单独量化。
+优化前的同一矩阵：codegen 因子 ~79×（A 4010 ms ÷ A′ 50.8 ms），35×79 ≈ 2730 vs 实测 2726（误差 0.2%）。79× → 49× 的差值就是"桥接实现低效（按名线性扫描）"的贡献，已在 6.1 单独量化。
 
 **E 路（AOT）分解**，全部实测：
 
 | 成分 | 倍数 | 证据 |
 |---|---:|---|
 | WAMR AOT vs 原生（干净代码下） | **~0.97×**（与原生同速） | E′ 干净 wasm 1.362 ms ÷ 原生 1.406 ms |
-| perry codegen 差 + rt 桥实现（同在 WAMR AOT，rt 代码也进机器码） | **~108×** | E 146.829 ms ÷ E′ 1.362 ms |
-| **乘积校验** | 0.97×108 ≈ **105** vs 实测 104.4（误差 <1%） | 闭合 ✓ |
+| perry codegen 差 + rt 桥接实现（同在 WAMR AOT，rt 代码也进机器码） | **~108×** | E 146.829 ms ÷ E′ 1.362 ms |
+| **乘积闭合校验** | 0.97×108 ≈ **105** vs 实测 104.4（误差 <1%） | 闭合 ✓ |
 
 两个矩阵并排看，可以看出以下几点：
 
 1. **引擎因子归零。** A′ 50.8 ms → E′ 1.362 ms（37×），干净 wasm 在 WAMR AOT 下与 `gcc -O2` 原生同速。解释器那 35× 是纯引擎开销，与 perry 无关。
-2. **codegen 因子从 49× 变成 ~108×，不是变差。** 解释器下 49× 的分母（A′ 50.8 ms）含解释器对**所有**代码的放大（干净代码也被拖慢 35×），桥所调用的 rt 侧同样被拖慢；AOT 下分母与 rt 侧都是机器码，剩下的差距是"perry NaN-box/桥调用形态的机器码 vs 干净 i64 机器码"的纯 codegen 成本。**49× 里解释器放大成分约占一半，另一半（机器码形态成本）在 AOT 下全部保留。** 这个因子变化是分母定义改变的结果，两个因子不可直接相除比较，属推断。
-3. **B 路被反超。** E 146.8 ms 比 B（V8 + perry JS 宿主层）1280 ms 快 8.7×。同一份 perry wasm，WAMR AOT + wasm rt 桥比 V8 + JS 宿主桥快一个数量级。A 路慢的主因在解释器，不是"wasm 路线不行"。
-4. **对 perry 的定位。** 换到 AOT 后 perry wasm 路与 perry 原生路（D 6.286 ms）差 **~23×**（解释器下 393×），且这 23× 几乎全是 codegen 桥调用形态（引擎已归零）。
+2. **codegen 因子从 49× 变成 ~108×，不是变差。** 解释器下 49× 的分母（A′ 50.8 ms）含解释器对**所有**代码的放大（干净代码也被拖慢 35×），桥接调用所调用的 rt 侧代码同样被拖慢；AOT 下分母与 rt 侧都是机器码，剩下的差距是"perry NaN-box/桥接调用形态的机器码 vs 干净 i64 机器码"的纯 codegen 成本。**49× 里解释器放大成分约占一半，另一半（机器码形态成本）在 AOT 下全部保留。** 这个因子变化是分母定义改变的结果，两个因子不可直接相除比较，属推断。
+3. **B 路被反超。** E 146.8 ms 比 B（V8 + perry JS 宿主层）1280 ms 快 8.7×。同一份 perry wasm，WAMR AOT + wasm rt 桥接比 V8 + JS 宿主桥接快一个数量级。A 路慢的主因在解释器，不是"wasm 路线不行"。
+4. **对 perry 的定位。** 换到 AOT 后 perry wasm 路与 perry 原生路（D 6.286 ms）差 **~23×**（解释器下 393×），且这 23× 几乎全是 codegen 桥接调用形态（引擎已归零）。
 
 **B 路分解**：node V8 wasm 引擎 vs 原生（干净代码下）**~2.5×**（B′ 3.40 ms，`node --no-liftoff` 强制 TurboFan 全优）；codegen + JS 宿主层因子 **~364×**；2.5×364 ≈ 910 与实测 910.4 闭合（误差 <0.1%）。审计前这套数字是 3.3× 与 253×。
 
@@ -433,7 +433,7 @@ $$\text{总倍数} = \underbrace{\frac{\text{干净 wasm} \times \text{引擎}}{
 | 变体 | 构造 | P50 |
 |---|---|---:|
 | `nohost` 直接调用版 | 与 perry fib 完全相同的调用图（每层 2 次跨模块调用），被调方是平凡 wasm 函数 | **1.371 ms** |
-| `nohost_box` 版 | 同上，但用 `call_indirect` 防内联，被调方做最小的 NaN-box i64↔f64 往返 | **5.913 ms**（税 4.604 ms） |
+| `nohost_box` 版 | 同上，但用 `call_indirect` 防内联，被调方做最小的 NaN-box i64↔f64 往返 | **5.913 ms**（其中装箱往返开销 4.604 ms） |
 | fib 纯机器码 | `fib_only.aot`，纯 i64 递归 fib(29) | 1.309 ms |
 | loop 纯机器码 | `loop_only.aot`（LLVM 把 10⁶ 循环常量折叠） | ~0.002 ms |
 | rt 侧 `mem_call` 函数体 | 余项 | 135.5 ms |
@@ -442,10 +442,10 @@ $$\text{总倍数} = \underbrace{\frac{\text{干净 wasm} \times \text{引擎}}{
 三条读数：
 
 1. **调用图形态本身不是瓶颈。** 与 perry 完全相同的调用图加上平凡被调方，AOT 编译器把被调方全部内联吸收，1.371 ms 与 fib 纯机器码 1.309 ms 基本相等。
-2. **即使强制"不可内联的间接调用 + 装箱往返"，也只到 5.9 ms。** 税 4.604 ms 对应 533 万次桥 × 1.4 ns/桥。
-3. **E 的 141.4 ms 减去 5.9 ms 得 135.5 ms，全部是 rt 侧 `mem_call` 函数体的执行成本**，即"NaN-box 解码 + nameId 直查 + tag 分派 + f64 算术 + 编码"。折算每桥成本：rt 函数体 ≈ 135.5 ms / 5,328,158 桥 ≈ **25.4 ns/桥**；装箱往返税 ≈ 4.604 ms / 3,328,158 桥（仅 fib）≈ **1.4 ns/桥**。**rt 侧代码在合并后也进机器码，占 E 的 95.8%。**
+2. **即使强制"不可内联的间接调用 + 装箱往返"，也只到 5.9 ms。** 开销 4.604 ms 对应 533 万次桥接调用 × 1.4 ns/次。
+3. **E 的 141.4 ms 减去 5.9 ms 得 135.5 ms，全部是 rt 侧 `mem_call` 函数体的执行成本**，即"NaN-box 解码 + nameId 直查 + tag 分派 + f64 算术 + 编码"。折算每次桥接调用的成本：rt 函数体 ≈ 135.5 ms / 5,328,158 次 ≈ **25.4 ns/次**；装箱往返开销 ≈ 4.604 ms / 3,328,158 次（仅 fib）≈ **1.4 ns/次**。**rt 侧代码在合并后也进机器码，占 E 的 95.8%。**
 
-对照解释器路：A 路 rt 桥约 463 ns/次（1.2 µs/层 ÷ 2）对比 AOT 的 25.4 ns，差 18×，量级自洽（引擎代差加上桥函数体从解释执行变为直接运行）。
+对照解释器路：A 路 rt 桥接约 463 ns/次（1.2 µs/层 ÷ 2）对比 AOT 的 25.4 ns，差 18×，量级自洽（引擎代差加上桥接函数体从解释执行变为直接运行）。
 
 结论：**23× 不是"两个优化器的差距"，而是"提供给优化器的输入形态"的差距**：类型化 IR 与类型擦除装箱字节码之间的差距。唯一收敛路径是让 wasm codegen 做类型特化。
 
@@ -455,7 +455,7 @@ $$\text{总倍数} = \underbrace{\frac{\text{干净 wasm} \times \text{引擎}}{
 
 **V8 侧**：`run_node_steady.mjs` 做阶梯预热（0/25/100/500/2000 次）观察 tier-up 收敛。
 
-| 跑法 | 稳态 P50 | 说明 |
+| 运行方式 | 稳态 P50 | 说明 |
 |---|---:|---|
 | node 默认 | 4.671 ms | 与文档 4.9 ms 一致；fib 单函数 tier-up 预算未耗尽即结束 |
 | `node --no-liftoff`（强制 TurboFan） | 3.400 ms | V8 真优形态 |
@@ -465,10 +465,10 @@ $$\text{总倍数} = \underbrace{\frac{\text{干净 wasm} \times \text{引擎}}{
 
 **QuickJS 侧**（F 路）是最强旁证：
 
-> 一个纯解释器（QuickJS 解释 JS，fib 每层 37 ns）比 WAMR AOT 执行 perry 装箱字节码（每层 2 桥 × 26.8 ns + fib 本体 ≈ 55 ns）还快。
+> 一个纯解释器（QuickJS 解释 JS，fib 每层 37 ns）比 WAMR AOT 执行 perry 装箱字节码（每层 2 次桥接调用 × 26.8 ns + fib 本体 ≈ 55 ns）还快。
 
-QuickJS 是"无桥的慢解释器"，E 是"有桥的机器码"，桥税 25.4 ns/次已经超过 QuickJS 解释一层 fib 除调用外的全部开销。这也解释了 B 路（V8 JS 宿主桥 0.39 µs/层）与 F 路的差距：JS 宿主桥比 wasm 桥再慢一个数量级。
-这正是反转所在：解释器快于机器码，差距只能源于桥。
+QuickJS 是"没有桥接调用的慢解释器"，E 是"带桥接调用的机器码"，桥接开销 25.4 ns/次已经超过 QuickJS 解释一层 fib 除调用外的全部开销。这也解释了 B 路（V8 JS 宿主桥接 0.39 µs/层）与 F 路的差距：JS 宿主桥接比 wasm 桥接再慢一个数量级。
+这正是反转所在：解释器快于机器码，差距只能源于桥接调用。
 
 三个引擎、三种实现路径指向同一结论，本文据此认为归因是稳健的：**引擎无过，根因在 perry wasm codegen 的类型擦除。**
 
@@ -476,30 +476,30 @@ QuickJS 是"无桥的慢解释器"，E 是"有桥的机器码"，桥税 25.4 ns/
 
 ## 6. 两种修复与其验证
 
-第 5 章把差距定位于"codegen 发射出的指令形态"上——`+` 与条件判定被改写为桥调用。本章回到发射点，先划清哪些算"过桥"、哪些本就必须过桥，再试零上游依赖的后处理与上游发射点特化两条修法，并交代它们各自的天花板。
+第 5 章把差距定位于"codegen 发射出的指令形态"上——`+` 与条件判定被改写为桥接调用。本章回到发射点，先划清哪些算"走桥接路径"、哪些本来就必须走桥接路径，再试零上游依赖的后处理与上游发射点特化两条修法，并交代它们各自的天花板。
 
-### 6.1 问题定位：可内联的算术被强制过桥
+### 6.1 问题定位：可内联的算术被改写为桥接调用
 
-先把"过桥"的范围界定清楚，避免过度表述。用 `wasm2wat` 反汇编加上游 codegen 源码（`crates/perry-codegen-wasm/src/emit/`）双重证实：
+先把"走桥接路径"的范围界定清楚，避免过度表述。用 `wasm2wat` 反汇编加上游 codegen 源码（`crates/perry-codegen-wasm/src/emit/`）双重证实：
 
 | 操作 | 路径 | 证据 |
 |---|---|---|
-| `+`（js_add） | **过桥**（`mem_call`） | `literals_vars.rs`：`BinaryOp::Add => emit_memcall("js_add")`，注释 "handles string+number etc."；bench.wasm 中 fib 每层 1 次，nameId=8 |
+| `+`（js_add） | **走桥接路径**（`mem_call`） | `literals_vars.rs`：`BinaryOp::Add => emit_memcall("js_add")`，注释 "handles string+number etc."；bench.wasm 中 fib 每层 1 次，nameId=8 |
 | `-` `*` `/` | **内联** f64.sub/mul/div（含 reinterpret 对） | 同文件 `_ =>` 分支 |
 | `<` `<=` `>` `>=` | **内联** f64.lt/le/gt/ge | `Expr::Compare` 数值分支 |
-| if/while/for 条件 | **过桥**（`mem_call_i32`，is_truthy） | `stmt.rs` L66-69 等，bench.wasm 中 nameId=12 |
-| `===` / `==` | 过桥（js_strict_eq） | `Compare` 分支 |
-| 字符串操作、console | 过桥（本来就必须） | `calls.rs` / `strings_json.rs` |
+| if/while/for 条件 | **走桥接路径**（`mem_call_i32`，is_truthy） | `stmt.rs` L66-69 等，bench.wasm 中 nameId=12 |
+| `===` / `==` | 走桥接路径（js_strict_eq） | `Compare` 分支 |
+| 字符串操作、console | 走桥接路径（本来就必须） | `calls.rs` / `strings_json.rs` |
 
-bench.ts 热路径的 2 次/层桥调用就是 `js_add`（加法）加 `is_truthy`（条件判定），不是全部算术。而要判断这是"值模型的必然"还是"可修复的缺陷"，有三条证据：
+bench.ts 热路径的 2 次/层桥接调用就是 `js_add`（加法）加 `is_truthy`（条件判定），不是全部算术。而要判断这是"值模型的必然"还是"可修复的缺陷"，有三条证据：
 
 1. **类型信息存在，wasm 后端完全未用。** `crates/perry-codegen-wasm/Cargo.toml` 只依赖 perry-hir / perry-codegen-js / perry-dispatch，**不依赖 perry-codegen**。类型化 ABI（`typed_abi.rs`）、i32 快路径（`expr/i32_fast_path.rs`）、`Type::Int32` 消费全在原生 LLVM 后端。
 2. **HIR 有完整类型基础设施。** `perry-hir/src/types.rs` 定义 `Int32`（注释为 "optimization for known integers"），`lower_types.rs` 能把 number 表达式推成 `Type::Number`，`analysis/value_types.rs` 是完整值类型推断。TS 是静态类型语言，`let sum = 0; sum += i` 的类型可静态获知。
 3. **int32 快路径编码三处都有解码路径，wasm 后端从不发射。** `PERRY_BOX_INT32`（`0x7FFE`）在 ABI（`perry_abi.h`）、runtime（`JSValue::int32`）、JS 宿主（`INT32_TAG`）三处都有解码路径，但 wasm emit 全目录 grep `0x7FFE` 零命中。wasm 后端函数签名统一为 `vec![ValType::I64; n]`（`compile.rs` L711-713），无任何类型特化签名。
 
-裁决是：**codegen 没做类型特化与内联，属于缺陷**；同一编译器家族的原生后端已经实现同等特化，wasm 后端这块是功能缺口。但它不是 wasm 后端独有的 bug，而是"wasm 后端整体落后于原生后端"的状态，真正属于"统一设计"的只有"所有用户值一律 NaN-box f64 位型"这一保守值模型。
+裁决是：**codegen 没做类型特化与内联，属于缺陷**；同一编译器家族的原生后端已经实现同等特化，wasm 后端这块是功能缺口。但它不是 wasm 后端独有的 bug，而是"wasm 后端整体落后于原生后端"的状态，真正属于"统一设计"的只有"所有用户值一律 NaN-box f64 位模式"这一保守值模型。
 
-桥实现本身的低效另做了单独量化。正式 rt 的 `invoke()` 原本对 10 项 `BRIDGES` 逐项 memcmp（`lib.rs` L582-586），而 nameId 本来就是稳定整数索引：
+桥接实现本身的低效另做了单独量化。正式 rt 的 `invoke()` 原本对 10 项 `BRIDGES` 逐项 memcmp（`lib.rs` L582-586），而 nameId 本来就是稳定整数索引：
 
 | rt 版本 | A 路 P50 (ms) | codegen 因子（÷ A′ 50.8 ms） |
 |---|---:|---:|
@@ -507,7 +507,7 @@ bench.ts 热路径的 2 次/层桥调用就是 `js_add`（加法）加 `is_truth
 | rt_fast 实验（nameId 缓存直查） | **2292** | **~45×** |
 | 正式 rt.wasm（nameId 缓存直查，已采纳） | **2470.678** | **~49×** |
 
-实验期降幅 1718 ms（−43%），按约 533 万次桥调用均摊 ≈ 322 ns/次，即每次桥调用从约 500 ns 降到约 180 ns。正式产物重测值 2470.678 ms 与实验值 2292 ms 偏差 +7.8%（在机器噪声范围内）。改动是最小 diff：新增 `static mut NAME_CACHE: [u8; 64]`，`invoke()` 加 nameId < 64 的缓存直查 fast path，按名扫描命中时回填；产物尺寸 16798 → 16928 B（+130 B）。剩下的 49× 来自参数解码/编码、NaN-box 指令形态，以及 WAMR 跨模块调用本身（约 30 ns/次 × 2/层）。
+实验期降幅 1718 ms（−43%），按约 533 万次桥接调用均摊 ≈ 322 ns/次，即每次桥接调用从约 500 ns 降到约 180 ns。正式产物重测值 2470.678 ms 与实验值 2292 ms 偏差 +7.8%（在机器噪声范围内）。改动是最小 diff：新增 `static mut NAME_CACHE: [u8; 64]`，`invoke()` 加 nameId < 64 的缓存直查 fast path，按名扫描命中时回填；产物尺寸 16798 → 16928 B（+130 B）。剩下的 49× 来自参数解码/编码、NaN-box 指令形态，以及 WAMR 跨模块调用本身（约 30 ns/次 × 2/层）。
 
 ### 6.2 零上游依赖的修复：通用桥内联后处理
 
@@ -526,33 +526,33 @@ bench.ts 热路径的 2 次/层桥调用就是 `js_add`（加法）加 `is_truth
 
 **能内联，不能折叠分派。** `wasm-dis` 确认 A2 中 `call $142/$143` 全部消失（模块从 6714 行 wat 变成 277922 行），整条 `mem_call` + `invoke` 被强制内联进 fib/loop，字面 nameId/argCount 的常量传播成功。但内联体里仍残留 11 路 `br_table`，其索引来自 `NAME_CACHE` 的**运行时内存 load**（`i32.load8_u offset=1051877+nameId`）；binaryen 没有内存常量传播，内存内容运行时才确定（miss 路径会写缓存），所以 switch 无法消除，完整 miss 路径的字符串查找代码也原样留在内联体里。`f64.const 8/12` 这种"常量分派"只有常量本身可折叠，分派表不可折叠。
 
-把 nameId 折叠成直接调用桥实现是可能的，但没有现成工具能做到：nameId 到 op 的映射存在于 rt 的数据表加 `br_table` 结构里，不是可识别的调用边；手工改 wat 可行，但收益介于 A5（93.5）与 B1（71.6）之间，而且只省 dispatch，`js_add`/`is_truthy` 的通用实现（类型打标、字符串分支、结果 unbox）仍在，属推断，不值得做。
+把 nameId 折叠成直接调用桥接实现是可能的，但没有现成工具能做到：nameId 到 op 的映射存在于 rt 的数据表加 `br_table` 结构里，不是可识别的调用边；手工改 wat 可行，但收益介于 A5（93.5）与 B1（71.6）之间，而且只省 dispatch，`js_add`/`is_truthy` 的通用实现（类型打标、字符串分支、结果 unbox）仍在，属推断，不值得做。
 
-**结论**：纯后处理能把 E 从 122.1 ms 降至约 93.5 ms（−23%），但内联下来的是"大 switch 迁移代码"，到不了特化量级；零上游改动的收益上限就是约 93 ms。代价是体积从 21 KB wasm 变成 661 KB、AOT 产物从 74 KB 变成 1.35 MB。
+**结论**：纯后处理能把 E 从 122.1 ms 降至约 93.5 ms（−23%），但内联下来的是整段被搬进来的大 switch 分派代码，到不了特化的量级；零上游改动的收益上限就是约 93 ms。代价是体积从 21 KB wasm 变成 661 KB、AOT 产物从 74 KB 变成 1.35 MB。
 
 **实验 B：先测定天花板。** 不真改上游，对 perry 原样字节码做**等价手工特化**（`spec_patch.py` 从 `bench_merged_patched.wat` 生成），替换的正是 codegen 类型特化会发射的指令：
 
 | 变体 | 改动 | P50 (ms) | 相对 E | 相对 E′ |
 |---|---|---:|---:|---:|
 | E（perry 原样） | — | 122.112 | 1× | 100× |
-| **B1** | 热路径 `+` 内联 `f64.add`，`is_truthy` 桥保留 | 71.612 | 0.586× | 58.9× |
-| **B2** | B1 + `is_truthy` 内联为 `i64.ne` 假盒比较（NaN-box 与影子栈纪律保留） | **17.185**（min 16.5 max 21.0） | **0.141×（快 7.1×）** | 14.1× |
-| V3 | 纯 f64：无盒、无影子栈、全内联 | 3.325 | 0.027×（快 36.7×） | 2.7× |
+| **B1** | 热路径 `+` 内联 `f64.add`，`is_truthy` 仍走桥接 | 71.612 | 0.586× | 58.9× |
+| **B2** | B1 + `is_truthy` 内联为 `i64.ne` 与假值盒的比较（NaN-box 与影子栈的内存访问纪律保留） | **17.185**（min 16.5 max 21.0） | **0.141×（快 7.1×）** | 14.1× |
+| V3 | 纯 f64：无装箱、无影子栈、全内联 | 3.325 | 0.027×（快 36.7×） | 2.7× |
 | E′ | clean_bench（纯 i64，同批） | 1.216 | 0.010×（快 100×） | 1× |
 
-这几个数字能否当作"codegen 特化后的真实预期"，取决于等价性论证：此程序里 `js_add` 两侧恒为 number（number + number 的 JS `+` 就是 f64.add，perry 的 number 表示即裸 f64 位型）；`is_truthy` 的输入恒为 `f64.lt` 产出的盒布尔（`TAG_TRUE` 0x7FF8000000000004 / `TAG_FALSE` 0x7FF8000000000003），`is_truthy(盒布尔) ≡ i64.ne v TAG_FALSE`。替换保持影子栈增减逐指令不变；打印路径的字符串拼接 `js_add` 与 `console_log` 桥原样保留。
+这几个数字能否当作"codegen 特化后的真实预期"，取决于等价性论证：此程序里 `js_add` 两侧恒为 number（number + number 的 JS `+` 就是 f64.add，perry 的 number 表示即裸 f64 位模式）；`is_truthy` 的输入恒为 `f64.lt` 产出的盒布尔（`TAG_TRUE` 0x7FF8000000000004 / `TAG_FALSE` 0x7FF8000000000003），`is_truthy(盒布尔) ≡ i64.ne v TAG_FALSE`。替换保持影子栈增减逐指令不变；打印路径的字符串拼接 `js_add` 与 `console_log` 桥接调用原样保留。
 
 B2 的乘性分解：
 
-- **E − B2 ≈ 105 ms** 是桥调用本体（每层 2 桥 × 约 2.08 M 桥）。类型特化把这部分全部消除。
-- **B2 − E′ ≈ 16 ms** 是 perry 的影子栈**内存纪律**（每个值经 global sp 存/取内存，fib 每层约 20 条辅助指令，1.66 M 层 × 约 10 ns）。这不是 NaN-box 的税：B2 的 i64↔f64 reinterpret 对在机器码层面是空操作，LLVM O3 会消除（属推断），box 本身近零成本；16 ms 是"值经内存而非寄存器存取"的调用纪律成本。
+- **E − B2 ≈ 105 ms** 是桥接调用本体（每层 2 次桥接调用 × 约 2.08 M 次）。类型特化把这部分全部消除。
+- **B2 − E′ ≈ 16 ms** 是 perry 的影子栈**内存访问纪律**（每个值经 global sp 存/取内存，fib 每层约 20 条辅助指令，1.66 M 层 × 约 10 ns）。这不是 NaN-box 的开销：B2 的 i64↔f64 reinterpret 对在机器码层面是空操作，LLVM O3 会消除（属推断），box 本身近零成本；16 ms 是"值经内存而非寄存器存取"的调用纪律成本。
 - **E′ ≈ 1.2 ms** 是纯机器码（LLVM 深度内联 fib）。
 
-V3（3.3 ms）与 E′（1.2 ms）的差是 LLVM 对 f64 与 i64 两种 fib 的内联/优化差异（属推断），两版都是"无盒无纪律"，不代表 perry 可控项。
+V3（3.3 ms）与 E′（1.2 ms）的差是 LLVM 对 f64 与 i64 两种 fib 的内联/优化差异（属推断），两版都既没有装箱、也不受影子栈内存访问纪律的约束，因此不代表 perry 可控的优化项。
 
 **实验 C：把实验 B 的知识自动化。** B2 的成功依赖"人读过 `src/bench.ts` 才知道那里是 number"，这份类型知识在 perry 产物里已被 codegen 擦除，因此 B2 只是**上界估计器**，不是可用修复。于是实现了一个通用后处理 pass（`tools/attribution/bridge_inline_pass.mjs`，约 800 行 JS，wat→wat），让它自己从模块里恢复类型信息。
 
-pass 的值域有三格：`NUM`（原始 f64 位型 = JS number）／`BOOLBOX`（`TAG_TRUE`/`TAG_FALSE` 二值盒布尔）／`OTHER`。**NUM 的语义依据**：perry 里 number 的表示就是裸 f64 位型（rt `encode(V::Num(n)) = n.to_bits()`，其余值一律 NaN-box），所以"f64 域生产者即 number"成立；perry 自己的 codegen 对 `-`/`*`/`/` 也是**无条件**内联 `F64Sub/F64Mul/F64Div`，等于已经把 f64 域操作数当 number，pass 没有引入 perry 未有的假设。
+pass 的值域有三格：`NUM`（原始 f64 位模式 = JS number）／`BOOLBOX`（`TAG_TRUE`/`TAG_FALSE` 二值盒布尔）／`OTHER`。**NUM 的语义依据**：perry 里 number 的表示就是裸 f64 位模式（rt `encode(V::Num(n)) = n.to_bits()`，其余值一律 NaN-box），所以"f64 域生产者即 number"成立；perry 自己的 codegen 对 `-`/`*`/`/` 也是**无条件**内联 `F64Sub/F64Mul/F64Div`，等于已经把 f64 域操作数当 number，pass 没有引入 perry 未有的假设。
 
 抽象解释在每个函数内按语句序进行，控制流合并取保守并：
 
@@ -568,20 +568,20 @@ is_truthy（nameId 12, argc 1）：
 → (i64.ne (i64.load BASE) (i64.const TAG_FALSE))
 ```
 
-两处改写都与 rt 侧实现逐位等价（`js_add(Num,Num) = Num(a+b)`、`truthy(Bool(b)) = b`）。**number 条件保守回退**：JS truthiness 里 `0`/`-0`/`NaN` 均 falsy，非二值，不内联，仍经由桥调用。其余桥（`console_log`=4、`string_concat`、`string_len`=10、`js_strict_eq`=13 等）一律不动；nameId 语义来自 rt 固定桥表，与数据段字符串序一致（`id = 序 + 1`）。
+两处改写都与 rt 侧实现逐位等价（`js_add(Num,Num) = Num(a+b)`、`truthy(Bool(b)) = b`）。**number 条件保守回退**：JS truthiness 里 `0`/`-0`/`NaN` 均 falsy，非二值，不内联，仍经由桥接调用。其余桥接调用（`console_log`=4、`string_concat`、`string_len`=10、`js_strict_eq`=13 等）一律不动；nameId 语义来自 rt 固定桥接表，与数据段字符串序一致（`id = 序 + 1`）。
 
 泛化验证用 4 个程序 × 7 个变体：
 
 | 程序 | 形态 | 用途 |
 |---|---|---|
 | `bench.ts` | 纯 number 热循环 | 基准 |
-| `probe_str.ts` | 字符串密集：`s = s + "ab"`（×32）、`s.length`、`s === s`（×20 万）、`hits + 1`、`n > 8` | 验证**不误伤**本应经由桥调用的字符串运算 |
+| `probe_str.ts` | 字符串密集：`s = s + "ab"`（×32）、`s.length`、`s === s`（×20 万）、`hits + 1`、`n > 8` | 验证**不会误伤**本应经由桥接调用的字符串运算 |
 | `probe_mixed.ts` | 混合类型：`total + i`（×20 万）、`i === 199999`、`label + "!"` | 验证类型判定边界 |
 | `probe_nested.ts` | 跨函数：`dbl`/`acc_upto`/主循环，返回值就是 js_add 结果 | 验证**跨过程**类型推断 |
 
-覆盖率（静态桥调用点改写比例，pass 报告）：
+覆盖率（静态桥接调用点改写比例，pass 报告）：
 
-| 程序 | 桥调用点 改写前→后 | 总覆盖率（保守 / `--closed-world`） | 明细 |
+| 程序 | 桥接调用点 改写前→后 | 总覆盖率（保守 / `--closed-world`） | 明细 |
 |---|---|---|---|
 | bench | 10 → 6 | 4/10 = **40%** / 40% | `js_add` 2/6（另 4 处操作数是字符串，正确拒绝）、`is_truthy` 2/2、`console_log` 0/2 |
 | probe_str | 11 → 6 | 5/11 = **45%** / 45% | `is_truthy` 4/4、`js_add` 1/2（**拒绝的是 `s + "ab"`**）、`string_len`/`string_eq`/`console_log` 0/5 |
@@ -601,7 +601,7 @@ is_truthy（nameId 12, argc 1）：
 
 最后一点揭示了这套方法的**天花板**：它是方法固有的，不是实现缺陷。perry 把每个用户函数都导出（`__wasm_func_N`），保守模式无法排除"宿主用字符串调它"，于是 `dbl(n) { return n + n }` 的参数不可证；合并后的 AOT 模块实际是封闭世界（只有 `_start` 一个入口），`--closed-world` 显式声明这一点后跨函数推断全部贯通（js_add 4/4）。**类型知识在模块里不可恢复时，pass 只能保守拒绝。** 防护规则保证了误判不会静默发生：只在两侧都可证 number（或输入可证是二值盒布尔）时改写；`TAG_TRUE`/`TAG_FALSE` 从被测模块自身推导而不是硬编码（实测本仓 rt 产物与 rt 源码常量不一致）；影子栈增减逐指令不变；每个变体都必须通过逐字节一致性验收，失配即 fail-fast。
 
-另一条被排除的路是"配置编译选项"：perry CLI / `@typerry/node` / 环境变量（`--target wasm|web`、`--minify`、`--fast-math`、`--march=*`、`--no-auto-optimize`、`PERRY_TARGET_CPU`、`PERRY_PRECOMPILE`）产出的 wasm **字节完全相同**（md5 `af3e4dd7…`，9827 B）。wamrc 侧唯一有效的是 `--enable-segue`（配 `--target=x86_64 --disable-llvm-jump-tables`）：122.14 → 99.84 ms（−18.3%），仍 71× 于原生，且被本 pass 覆盖（桥调用被消除后，segue 也就没有收益）。其余开关无效或更差（`--opt-level=0` 灾难性 3.2×、`--enable-shared-heap` +29%、`--enable-llvm-pgo` 因缺 `WAMR_BUILD_STATIC_PGO=1` 无法闭环未验证）。
+另一条被排除的路是"配置编译选项"：perry CLI / `@typerry/node` / 环境变量（`--target wasm|web`、`--minify`、`--fast-math`、`--march=*`、`--no-auto-optimize`、`PERRY_TARGET_CPU`、`PERRY_PRECOMPILE`）产出的 wasm **字节完全相同**（md5 `af3e4dd7…`，9827 B）。wamrc 侧唯一有效的是 `--enable-segue`（配 `--target=x86_64 --disable-llvm-jump-tables`）：122.14 → 99.84 ms（−18.3%），仍 71× 于原生，且被本 pass 覆盖（桥接调用被消除后，segue 也就没有收益）。其余开关无效或更差（`--opt-level=0` 灾难性 3.2×、`--enable-shared-heap` +29%、`--enable-llvm-pgo` 因缺 `WAMR_BUILD_STATIC_PGO=1` 无法闭环未验证）。
 
 ### 6.3 上游 patch：codegen 发射点特化
 
@@ -611,7 +611,7 @@ patch 的对象是 vendored perry（commit `87ecb02b`，typerry `d13b5769` 的 s
 
 **新增保守类型事实**（新文件 `src/emit/type_facts.rs`，419 行）：收集声明类型加轻量数据流，提供 `expr_is_number` / `expr_is_boolean`。
 
-- **number 判据**：`Number`/`Integer` 字面量；声明为 `Number`/`Int32` 的局部；`Update`（`++`/`--`）、`Unary Neg/Pos`、`Binary Sub/Mul/Div`（这些 perry 无条件 f64 内联，产物恒 f64 位型，perry 自身已当 number 处理，不引入新假设）；返回类型声明为 number 的函数调用；两侧都可证的 `+`（递归）。
+- **number 判据**：`Number`/`Integer` 字面量；声明为 `Number`/`Int32` 的局部；`Update`（`++`/`--`）、`Unary Neg/Pos`、`Binary Sub/Mul/Div`（这些 perry 无条件 f64 内联，产物恒 f64 位模式，perry 自身已当 number 处理，不引入新假设）；返回类型声明为 number 的函数调用；两侧都可证的 `+`（递归）。
 - **boolean 判据**：`Bool` 字面量；`Compare`（发射恒为 `If(Result I64)` 选 TAG_TRUE/TAG_FALSE）；`!x`；声明为 `Boolean` 的局部；返回布尔可证的调用。
 - **数据流补充**（这是 `let sum = 0` 能被证明的关键）：无注解 `let x = <init>` 且 init 可证同型则 x 进入候选，随后做**赋值敏感不动点**：x 的每个赋值点 RHS 都必须可证同型才保留（`Update` 恒 number，不破坏 number 候选，但会破坏 boolean 候选故拒绝）。从乐观初值单调递减，收敛后剩余候选在任意执行路径上取值都可证同型。**被闭包捕获或被函数 `captures` 捕获的 id 一律拒绝**。扫描用 perry-hir 的 `walker::walk_expr_children`（穷尽匹配，编译期强制覆盖所有 Expr 变体，不漏赋值点）。
 
@@ -632,9 +632,9 @@ if self.expr_is_boolean(condition) {
 } else { /* 原 emit_frame_begin(1) + store_arg + emit_memcall_i32("is_truthy", 1) */ }
 ```
 
-**等价性论证**（决定这些数字是不是"真实产物"而非"手工变体"）：perry 的 number 表示即裸 f64 位型（rt `encode(V::Num(n)) = n.to_bits()`）。若运行时两侧确为 number，`js_add(Num(a), Num(b))` 返回 `Num(a+b)`，与内联的 `i64.reinterpret_f64(f64.add(f64.reinterpret_i64(a), f64.reinterpret_i64(b)))` **逐位相同**（含 NaN/±0/Inf 传播，f64 加法语义一致）。影子栈方面，原路径 `emit_frame_begin(2)` 推进 sp+16、`emit_memcall` 内收 sp−16，净 0；特化路径完全不触及 sp，净效果一致。字符串分支：只有两侧**都可证** number 才内联，`string + anything` 恒经原桥，JS `+` 的字符串拼接语义保留。布尔条件方面，`expr_is_boolean` 只接受"恒产 TAG_TRUE/TAG_FALSE 二值盒布尔"的表达式，对这些值 `is_truthy(盒布尔) ≡ (v != TAG_FALSE)` 逐位等价。**number 条件保守回退**：0/−0/NaN 均 falsy，裸 i64 比较会误判，故一律回退原桥。
+**等价性论证**（决定这些数字是不是"真实产物"而非"手工变体"）：perry 的 number 表示即裸 f64 位模式（rt `encode(V::Num(n)) = n.to_bits()`）。若运行时两侧确为 number，`js_add(Num(a), Num(b))` 返回 `Num(a+b)`，与内联的 `i64.reinterpret_f64(f64.add(f64.reinterpret_i64(a), f64.reinterpret_i64(b)))` **逐位相同**（含 NaN/±0/Inf 传播，f64 加法语义一致）。影子栈方面，原路径 `emit_frame_begin(2)` 推进 sp+16、`emit_memcall` 内收 sp−16，净 0；特化路径完全不触及 sp，净效果一致。字符串分支：只有两侧**都可证** number 才内联，`string + anything` 恒经原桥接调用，JS `+` 的字符串拼接语义保留。布尔条件方面，`expr_is_boolean` 只接受"恒产 TAG_TRUE/TAG_FALSE 二值盒布尔"的表达式，对这些值 `is_truthy(盒布尔) ≡ (v != TAG_FALSE)` 逐位等价。**number 条件保守回退**：0/−0/NaN 均 falsy，裸 i64 比较会误判，故一律回退原桥接调用。
 
-辅助修复一处：`compile.rs` 的 globals init 循环（`:1319`）与 class 注册循环（`:1339`）补 `self.current_mod_idx = mod_idx;`（原本缺失），per-module 类型事实会取错索引。
+辅助修复一处：`compile.rs` 的 globals init 循环（`:1319`）与 class 注册循环（`:1339`）补 `self.current_mod_idx = mod_idx;`（原本缺失），否则 per-module 的类型事实会取错索引。
 
 **性能**（同口径 `build/aot_time`，12 轮弃第 1 轮取 11 样本中位数）：
 
@@ -642,8 +642,8 @@ if self.expr_is_boolean(condition) {
 |---|---:|---:|---|
 | E（perry 原样） | 122.112 | 1× | — |
 | **patch 后（codegen 特化）** | **3.891**（min 3.673 / max 4.009，n=11） | **0.0319×（快 31.4×）** | 达到并超过 17 ms 目标 4.4× |
-| B2（等价手工特化，保留影子栈纪律） | 17.185 | 0.141× | 实验 B 天花板 |
-| V3（纯 f64，无盒无影子栈） | 3.325 | 0.027× | 全去盒上限 |
+| B2（等价手工特化，保留影子栈的内存访问纪律） | 17.185 | 0.141× | 实验 B 天花板 |
+| V3（纯 f64，无装箱、无影子栈） | 3.325 | 0.027× | 完全去装箱的上限 |
 | E′（clean i64） | 1.216 | 0.010× | 硬件下限 |
 
 **正确性**：`fib(29) = 514229`、`sum = 499999500000`；`./demo.sh` **6/6 PASS**（含负向 `array_new` 报错）；3 个泛化探针 `probe_{str,mixed,nested}.ts` 的 patch 后产物经完整 E 路（rt 桩 + 链接 + WAMR）输出与 perry JS 宿主层参照逐字节一致（`64/200000/long`、`n!/19999900000`、`323400`）。
@@ -666,7 +666,7 @@ fib 热路径上，`if (n < 2)` 由 `mem_call_i32(is_truthy)` 变成 `i64.ne TAG
 
 答案是**替换的粒度不同**：B2 的手工替换仅修改 `mem_call` 调用本身，其外围的**帧建立**与**影子栈内存槽往返**指令原样保留；而 codegen 发射点特化让整条帧建立与内存槽往返**都不再发射**，产物更为紧凑，AOT 后端因此能更好优化。patch 后产物因此跨过 B2 天花板 17.185 ms，逼近 V3 的 3.325 ms。这条因果解释在原文中标注为推断（`[INFERENCE]`），本文保留该标注。
 
-反过来说，这也解释了 6.2 里实验 B 的分解为什么成立：E − B2 ≈ 105 ms 是桥本体（可被特化消除），B2 − E′ ≈ 16 ms 是影子栈内存纪律（手工替换无法消除，但源头修复可以）。patch 把两者一并消除。
+反过来说，这也解释了 6.2 里实验 B 的分解为什么成立：E − B2 ≈ 105 ms 是桥接调用本体（可被特化消除），B2 − E′ ≈ 16 ms 是影子栈的内存访问纪律（手工替换无法消除，但源头修复可以）。patch 把两者一并消除。
 
 ### 6.5 两条路的取舍
 
@@ -679,13 +679,13 @@ fib 热路径上，`if (n < 2)` 由 `mem_call_i32(is_truthy)` 变成 `i64.ne TAG
 | 本 pass + wasm-opt(A5) | 16.034 | 0.130× | 是 | +0 | 低 |
 | 本 pass + segue | 17.315 | 0.141× | 是 | +0 | 低 |
 | B2：等价手工特化 | 17.185 | 0.141× | 是（但不可复用） | ~4 h | 上界估计器，非修复 |
-| V3：纯 f64 全去盒 | 3.325 | 0.027× | 是（但不可复用） | ~8 h | 上界估计器，非修复 |
+| V3：纯 f64 完全去装箱 | 3.325 | 0.027× | 是（但不可复用） | ~8 h | 上界估计器，非修复 |
 | **上游 patch（codegen 发射点特化）** | **3.891** | **0.0319×（快 31.4×）** | 否 | 未单独计量 | 见 7.2、6.3 遗留风险 |
-| E′：干净 i64 wasm（引擎同速锚） | 1.216 | 0.010× | 是 | — | — |
+| E′：干净 i64 wasm（引擎同速锚点） | 1.216 | 0.010× | 是 | — | — |
 
-叠加结论：wasm-opt 叠在 pass 之上只剩 −5%（16.96 → 16.03），`--converge` 等强组合没有额外收益；**segue 在桥被消除后不再有用**（16.96 → 17.32，方向反转），它的收益本来就来自优化 AOT 里那条桥分派路径，而 pass 已把该路径删掉。三者叠加无意义。
+叠加结论：wasm-opt 叠在 pass 之上只剩 −5%（16.96 → 16.03），`--converge` 等强组合没有额外收益；**segue 在桥接调用被消除后不再有用**（16.96 → 17.32，方向发生反转），它的收益本来就来自优化 AOT 里那条桥接分派路径，而 pass 已把该路径删掉。三者叠加没有意义。
 
-**核心回答**：不改 perry 上游，能把 122 ms 降至 ≤20 ms 量级（16.0–17.0 ms，即 B2 上界水平），最小手段是单个 wat→wat 后处理 pass，接在既有 E 路链路的 `patch_merged` 之后、`wasm-as` 之前，构建链只多一行命令；代价是约 10 小时一次性投入加随 perry 版本回归的风险。改了上游，则直接到 3.891 ms，此时后处理 pass 可以整体退役：codegen 发射点特化是"源头修"，产物更紧，且不依赖 wat 后处理基础设施。
+**核心回答**：不改 perry 上游，能把 122 ms 降至 ≤20 ms 量级（16.0–17.0 ms，即 B2 上界水平），最小手段是单个 wat→wat 后处理 pass，接在既有 E 路链路的 `patch_merged` 之后、`wasm-as` 之前，构建链只多一行命令；代价是约 10 小时的一次性投入，外加随 perry 版本回归的风险。改了上游，则直接到 3.891 ms，此时后处理 pass 可以整体退役：codegen 发射点特化是"源头修"，产物更紧，且不依赖 wat 后处理基础设施。
 
 修复完成后，还剩两个问题：这些修复能维持多久、随上游演进需付出多少代价（第 7 章），以及前面的结论有多可信、覆盖到哪里为止（第 8 章）。
 
@@ -697,9 +697,9 @@ fib 热路径上，`if (n < 2)` 由 `mem_call_i32(is_truthy)` 变成 `i64.ne TAG
 
 三种修复手段（wasm-opt 后处理、wat 通用 pass、上游发射点特化）里，只有最后一种是可长期持有的，理由不在"快多少"，而在方案层性质。
 
-**编译期特化，而非运行时优化。** 桥调用问题的本质是"信息在编译期就存在，却在运行期才被恢复"。`js_add(number, number)` 的语义在发射点即可判定，perry 的原生后端已经这样做了（`typed_abi.rs`、`i32_fast_path.rs`、`Type::Int32`）。把这个判定移回发射点，等于把运行时的一次动态分派换成编译期的一次分支，问题在它产生的层次上被消除。wasm-opt 的失败恰好反证了这一点：它能内联整条桥，却无法折叠分派，因为分派表的索引来自运行时的内存 load，binaryen 没有内存常量传播。
+**编译期特化，而非运行时优化。** 桥接调用问题的本质是"信息在编译期就存在，却在运行期才被恢复"。`js_add(number, number)` 的语义在发射点即可判定，perry 的原生后端已经这样做了（`typed_abi.rs`、`i32_fast_path.rs`、`Type::Int32`）。把这个判定移回发射点，等于把运行时的一次动态分派换成编译期的一次分支，问题在它产生的层次上被消除。wasm-opt 的失败恰好反证了这一点：它能内联整条桥接调用，却无法折叠分派，因为分派表的索引来自运行时的内存 load，binaryen 没有内存常量传播。
 
-**等价性可证。** number 的表示是裸 f64 位型，`js_add` 在 number 上的行为就是 f64 加法，内联后的 `i64.reinterpret_f64(f64.add(...))` 与之逐位相同；盒布尔的 `is_truthy` 就是 `!= TAG_FALSE`。影子栈方面，原路径的 sp 净增减为 0，特化路径不触及 sp，净效果一致。这不是"看似等价"，而是可以逐位论证的等价性。不可证的地方一律回退：字符串 `+`、number 条件、`Mod`/`Pow`、`Eq`/`Ne`、闭包捕获、跨 module 函数返回值特化，全部保留原桥，行为与基线逐字节一致。
+**等价性可证。** number 的表示是裸 f64 位模式，`js_add` 在 number 上的行为就是 f64 加法，内联后的 `i64.reinterpret_f64(f64.add(...))` 与之逐位相同；盒布尔的 `is_truthy` 就是 `!= TAG_FALSE`。影子栈方面，原路径的 sp 净增减为 0，特化路径不触及 sp，净效果一致。这不是"看似等价"，而是可以逐位论证的等价性。不可证的地方一律回退：字符串 `+`、number 条件、`Mod`/`Pow`、`Eq`/`Ne`、闭包捕获、跨 module 函数返回值特化，全部保留原桥接调用，行为与基线逐字节一致。
 
 **向"上游的既有方向"收敛。** 上游已有 `--opt-report` 对特化拒绝原因的完整分类，说明类型特化是既定路线；HIR 侧的类型推断（`infer_expr_type` / `infer_binary_type`）现成可调用，无需新写推断。因此这一 patch 属于"补齐 wasm 后端与原生后端之间的落差"，而不是引入一套新的设计。
 
@@ -722,7 +722,7 @@ fib 热路径上，`if (n < 2)` 由 `mem_call_i32(is_truthy)` 变成 `i64.ne TAG
 
 **测试面：10 探针矩阵，零误判。** 正确性证据现在有四块。E1 = 双模块 fast-interp（`patch-app-memory` + `build/rt.wasm` + `host/perry_link`）；E2 = `wasm-merge` 合并单模块后 `patch_merged.mjs` → `wamrc` AOT → AOT iwasm（与 `aot_e.sh` 同链路）；"差分" = patch 绑定与基线绑定（`/tmp/typerry.node.orig`）在同一探针上的参照输出比对；参照物是 perry 自带 JS 宿主层（`wasmBoot`，`probe_ref.mjs`）：
 
-| 探针 | 覆盖形态 | E1 双模块 fast-interp | E2 合并 AOT | 差分 | 桥 `mem_call` | 桥 `mem_call_i32` |
+| 探针 | 覆盖形态 | E1 双模块 fast-interp | E2 合并 AOT | 差分 | 桥接 `mem_call` | 桥接 `mem_call_i32` |
 |---|---|---|---|---|---|---|
 | `probe_reuse_1_class` | 类 + 类方法内算术 | SKIP | SKIP | PASS | 13→13 | 1→0 |
 | `probe_reuse_2_closure` | 闭包捕获 | SKIP | SKIP | PASS | 10→9 | 1→0 |
@@ -735,24 +735,24 @@ fib 热路径上，`if (n < 2)` 由 `mem_call_i32(is_truthy)` 变成 `i64.ne TAG
 | `probe_reuse_9_nullchk` | `x !== null` + number 条件回退 | PASS | PASS | PASS | 6→2 | 7→5 |
 | `probe_reuse_10_mod` | 模运算 `%` | SKIP | SKIP | PASS | 6→5 | 3→1 |
 
-汇总：E 路逐字节 PASS 5、SKIP 5、**FAIL 0**，差分 **10/10 PASS**。SKIP 的 5 个探针不是 patch 的问题，而是本仓 E 路 rt 桩只实现了 13 个桥，类/闭包/数组/`js_mod` 一律 trap，基线同样如此；这些探针的正确性证据只由"差分"一列承担（patch 绑定与基线绑定在同一探针上的参照输出逐字节一致，所以不存在类型误判）。
+汇总：E 路逐字节 PASS 5、SKIP 5、**FAIL 0**，差分 **10/10 PASS**。SKIP 的 5 个探针不是 patch 的问题，而是本仓 E 路 rt 桩只提供了 13 个桥接实现，类/闭包/数组/`js_mod` 一律 trap，基线同样如此；这些探针的正确性证据只由"差分"一列承担（patch 绑定与基线绑定在同一探针上的参照输出逐字节一致，所以不存在类型误判）。
 
 SKIP 的对照实验是：同一探针换用**基线**绑定经 E 路，报错与 patch 版逐字相同（`Exception: bridge function 'class_set_method' is not implemented`），所以 trap 与 patch 无关。
-两条非显然读数值得记下：`probe_reuse_1_class` 的 `mem_call` 是 **13→13 零改写**，类方法体里无注解局部的 `s + this.step(i)` 全被保守拒绝，与 patch 声明的缺口一致；但它的 `mem_call_i32` 是 1→0，说明**条件特化仍然生效**（`i < k` 是 `Compare`，二值布尔由构造保证，不依赖局部类型推断）。这正说明缺口是"收益不足"，不是"误获收益"。`probe_reuse_9_nullchk` 的 `mem_call_i32` 是 7→5，`if (n)`（number 条件）与 `if (z)`（`z = 0`）没有被内联，参照输出 `111` 而非 `1111` 证明 0 仍按 falsy 经桥调用，这是"number 条件保守回退"的实证。
+两条非显然读数值得记下：`probe_reuse_1_class` 的 `mem_call` 是 **13→13 零改写**，类方法体里无注解局部的 `s + this.step(i)` 全被保守拒绝，与 patch 声明的缺口一致；但它的 `mem_call_i32` 是 1→0，说明**条件特化仍然生效**（`i < k` 是 `Compare`，二值布尔由构造保证，不依赖局部类型推断）。这正说明缺口是"收益不足"，不是"误获收益"。`probe_reuse_9_nullchk` 的 `mem_call_i32` 是 7→5，`if (n)`（number 条件）与 `if (z)`（`z = 0`）没有被内联，参照输出 `111` 而非 `1111` 证明 0 仍按 falsy 经桥接调用，这是"number 条件保守回退"的实证。
 
 **版本跟随成本。** 三条线都要随 perry 上游演进。
 
 1. **上游 patch 的移植性实测为"有冲突，可手工解决"。** 对上游 main（commit `6768ed6bb2c550922bb7bdbebe41429a58438139`）跑 `git apply --check`：6 个文件里 4 个干净，`emit/compile.rs` 与 `emit/module_emitter.rs` 冲突。冲突全是上下文漂移而非 API 变形，被改的那几行在上游 main 逐字存在。手工解决 5 处（含丢弃 2 个 hunk）、净约 9 行后，`cargo check -p perry-codegen-wasm` 通过。
    其中一处冲突值得记：patch 在 `compile.rs` 的两个循环里**替换**了 `current_mod_idx` 赋值，而上游 main 早已自己加了它，写法是"保留 `func_map` 赋值 + 追加 `current_mod_idx`"。patch 的替换会删掉 `self.func_map = self.module_func_maps[mod_idx].clone()`，对多 module 程序的 `FuncRef` 解析是**潜在回归**；本仓 demo/bench 都是单 module，因此没有暴露。
    同时确认**上游没有自己做同样的特化**：main 的 `BinaryOp::Add` 仍是 `emit_memcall(func, "js_add", 2)`，条件仍是 4 处 `emit_memcall_i32(func, "is_truthy", 1)`，wasm 后端没有任何 `infer_expr_type` 消费者。patch 的价值未被上游吸收，需要主动提 PR。
-2. **wat 后处理 pass 依赖 perry 产物的指令形态**（`(drop (call $mem_call (f64.const <nameId>) …))` 加影子栈槽位约定），perry 一改 codegen 或桥发射形态就可能失配，这是后处理相对上游改造的**永久劣势**，必须随 perry 版本回归。
+2. **wat 后处理 pass 依赖 perry 产物的指令形态**（`(drop (call $mem_call (f64.const <nameId>) …))` 加影子栈槽位约定），perry 一改 codegen 或桥接调用的发射形态就可能失配，这是后处理相对上游改造的**永久劣势**，必须随 perry 版本回归。
 3. **typed ABI 化的长期路线**（7.3）一旦落地，本文 patch 的发射点分支需要重新对齐到 typed 值表示。
 
-**上游 patch 自身的遗留风险**（如实记录）：字符串 `+`、number 条件、`Mod`/`Pow`、`Eq`/`Ne` 仍经由桥调用（正确性所需或保守回退）；类方法体/闭包体内无注解局部、跨 module 导入函数返回类型未纳入数据流，因此保守回退（无收益但无误判）；类型注解沿用 perry 上游语义（与原生 typed ABI 同样信任声明类型）。
+**上游 patch 自身的遗留风险**（如实记录）：字符串 `+`、number 条件、`Mod`/`Pow`、`Eq`/`Ne` 仍经由桥接调用（正确性所需或保守回退）；类方法体/闭包体内无注解局部、跨 module 导入函数返回类型未纳入数据流，因此保守回退（无收益但无误判）；类型注解沿用 perry 上游语义（与原生 typed ABI 同样信任声明类型）。
 
 ### 7.3 长期路线：typed ABI 化
 
-当前 patch 跨过了 B2 天花板，但与干净 i64 wasm（E′ 1.216 ms）之间还有一截，来源是影子栈内存纪律。要去掉它，需要把 wasm 后端的值表示与调用纪律整体改为 typed。这是已规划的"路径 4"，其六阶段方案见 `docs/typed-abi-migration.md`：
+当前 patch 跨过了 B2 天花板，但与干净 i64 wasm（E′ 1.216 ms）之间还有一截，来源是影子栈的内存访问纪律。要去掉它，需要把 wasm 后端的值表示与调用纪律整体改为 typed。这是已规划的"路径 4"，其六阶段方案见 `docs/typed-abi-migration.md`：
 
 | 阶段 | 内容 | 验收 P50 | 人日 |
 |---|---|---:|---|
@@ -761,7 +761,7 @@ SKIP 的对照实验是：同一探针换用**基线**绑定经 E 路，报错�
 | 2 | 字面量/局部 typed（`INT32_TAG` 0x7FFE + 局部 widening） | ~12–17（推断） | 2–4 |
 | 3 | 签名 typed + trampoline + 拒绝制 | ~12–17（推断） | 4–7 |
 | 4 | 去影子栈（typed 函数溢出改 local） | ~3.3–5.0（V3 锚） | 4–8 |
-| 5 | `rt.*` 桥 typed 重载双轨 | ~3.3 | 3–6 |
+| 5 | `rt.*` 桥接调用的 typed 重载双轨 | ~3.3 | 3–6 |
 
 合计约 16–30 人日（一人约 3–6 周）；两个可发布里程碑：M1（阶段 1 后 = B2，可发布）、M2（阶段 4 后 = V3，可发布）。方案里有一条非显然的结论：**阶段 2、3 对本基准的直接收益近零**，因为 fib 已是 TS 注解函数、递归调用已是直接 wasm `Call`、算术已在阶段 1 内联；它们真正的价值是作为阶段 4 的前置基础设施，14 ms 的跃迁发生在阶段 4。
 需要说明的是，本文实验（6.3）只实现了阶段 0 与阶段 1 的合并形态，且实现方式与规划文档不同（自建 `type_facts` 而非装配 HIR 类型环境）。规划文档中阶段 2–5 的收益均为规划值，其中带推断标注的两行尚未实测。
@@ -772,7 +772,7 @@ SKIP 的对照实验是：同一探针换用**基线**绑定经 E 路，报错�
 
 1. **上游 main 上只做了 `cargo check`（编译通过），没有在 main 上重建 napi 绑定跑 E 路计时与输出**，因此"移植后性能与正确性不变"是**推断**，依据是改动全在类型判定来源与 hunk 锚点，发射点代码逐字未动。
 2. **探针矩阵覆盖 10 种形态，仍未覆盖** `switch`、`try/catch`、generator/async、`bigint`、跨 module import 返回类型。
-3. **E 路 rt 桩只实现 13 个桥，是本仓探针装置的限制，与 patch 质量无关**；探针 1/2/3/6/10 的 E 路证据因此为空，其正确性证据只有"差分"一列。
+3. **E 路 rt 桩只提供 13 个桥接实现，是本仓探针装置的限制，与 patch 质量无关**；探针 1/2/3/6/10 的 E 路证据因此为空，其正确性证据只有"差分"一列。
 4. **假设**：评估过程里脚本会临时把基线绑定换进 `node_modules`，退出时（含失败路径）恢复；评估结束时仓库绑定状态为 patch 版（md5 `faa62982e17c380da9a67ff61e773d6f`）。
 
 5. **一项已做的正向验证**：FAIL 检测路径本身经过验证，注入篡改会报错、脚本退出码非 0。
@@ -791,7 +791,7 @@ SKIP 的对照实验是：同一探针换用**基线**绑定经 E 路，报错�
 
 7.2 记录的复用性评估还暴露出一个本文实验未覆盖的风险面：patch 对 `compile.rs` 两处 `current_mod_idx` 的**替换式**改法会删掉 `func_map` 赋值，对多 module 程序的 `FuncRef` 解析是潜在回归；本仓 demo 与基准都是单 module，所以整个实验过程中没有触发，上游 main 的写法（保留 `func_map` + 追加 `current_mod_idx`）才是正确形态。这类"本仓恰好不触发"的缺陷说明：单 module 基准不能替代多 module 回归测试。
 
-归因分析自己给出了限定词：优化前的 79×/253× codegen 因子等于"可内联而未内联的算术/条件过桥（缺陷，可修复）"、"桥实现低效（nameId 线性扫描，实测值 34×）"、"NaN-box 指令形态"三者的乘积；其中"必要跨边界"（字符串、console 等）的成本不含在这三个因子里，基准未覆盖这类负载，对字符串密集负载应理解为"必要的跨边界成本加同样的实现低效"。
+归因分析自己给出了限定词：优化前的 79×/253× codegen 因子等于"可内联而未内联的算术/条件走桥接路径（缺陷，可修复）"、"桥接实现低效（nameId 线性扫描，实测值 34×）"、"NaN-box 指令形态"三者的乘积；其中"必要跨边界"（字符串、console 等）的成本不含在这三个因子里，基准未覆盖这类负载，对字符串密集负载应理解为"必要的跨边界成本加同样的实现低效"。
 
 这一缺口在 6.2 得到部分弥补：`probe_str.ts`（字符串密集）与 `probe_mixed.ts`（混合类型）进入了泛化验证，收益分别是 2.0× 与 3.6×。但它们只用于验证 pass 的覆盖率与误判，没有被纳入第 4、5 章的乘性分解矩阵。**字符串密集负载在 A/E 两路中的占比仍未测量**，文档已把它列为限制。
 
@@ -803,7 +803,7 @@ SKIP 的对照实验是：同一探针换用**基线**绑定经 E 路，报错�
 - D 四批复测 P50：6.651 / 6.558 / 6.428 / 6.286 ms（散布 ±6%）；
 - B 扣除的 node 启动基线（优化前 23 ms、优化后 24 ms）在 1.24–1.28 s 里占约 2%，不确定度与之同量级。
 
-`perf` 未安装，改用 callgrind（指令数精确，周期数由 P50 × 实测频率约 3.0 GHz 推算，±15% 噪声）。另一处工具限制：valgrind 下 WAMR 宿主因 `touch_pages` 栈增长受限而 SIGSEGV（8M/128M/512M 主栈同样），A/A′ 路的动态指令数无法用 callgrind 直接测，也没能给出"wasm 路每语义步指令数 vs 原生"的直接比值；该比值由 35× 与各自 IPC 估算，属推断，估计 wasm 路指令量约为原生的 10–20 倍。
+`perf` 未安装，改用 callgrind（指令数精确，周期数由 P50 × 实测频率约 3.0 GHz 推算，±15% 噪声）。另一处工具限制：valgrind 下 WAMR 宿主因 `touch_pages` 栈增长受限而 SIGSEGV（8M/128M/512M 主栈同样），A/A′ 路的动态指令数无法用 callgrind 直接测，也没能给出"wasm 路每条语义操作的指令数 vs 原生"的直接比值；该比值由 35× 与各自 IPC 估算，属推断，估计 wasm 路指令量约为原生的 10–20 倍。
 
 ### 8.3 口径不一致是刻意保留的
 
@@ -828,7 +828,7 @@ perry 的行号与内部结构都在变动。本探索记录到的上游位置�
 以下结论在材料中已标注推断，本文保留同等不确定性，汇总见附录 E。阅读本文数字时应注意的划分：
 
 - **实测**：六路 P50 表、乘性因子与闭合校验、基线审计三条证据、隔离实验 `nohost` 系列、patch 前后 P50 与反汇编计数、pass 的 28 次逐字节一致与覆盖率。
-- **推断**：rt 分派/装箱占每层 1.2 µs 的大头（未逐项插桩）；B 路 364× 内 codegen 形态与 JS 宿主层的相对占比未拆分；E 路 49×→108× 的分母定义说明；D 路 fib/循环拆分（约 4 ms / 约 1.5 ms）由指令量比例推算；D 编译 1.9 s 的耗时构成未拆分；B2 的 reinterpret 对在 LLVM 下为空操作；V3 与 E′ 的 2.1 ms 差为 LLVM 对 f64 与 i64 的内联差异；pass 实现的约 10 小时为投入量级估计而非受控工时测量；patch 快于 B2 的 4.4× 归因于"整条帧建立与内存槽往返不再发射"。
+- **推断**：rt 侧的分派与装箱占掉每层 1.2 µs 的大头（未逐项插桩）；B 路 364× 内 codegen 形态与 JS 宿主层的相对占比未拆分；E 路 49×→108× 的分母定义说明；D 路 fib/循环拆分（约 4 ms / 约 1.5 ms）由指令量比例推算；D 编译 1.9 s 的耗时构成未拆分；B2 的 reinterpret 对在 LLVM 下为空操作；V3 与 E′ 的 2.1 ms 差为 LLVM 对 f64 与 i64 的内联差异；pass 实现的约 10 小时为投入量级估计而非受控工时测量；patch 快于 B2 的 4.4× 归因于"整条帧建立与内存槽往返不再发射"。
 - **条件性 / 未复现**：坑 4 的 `initializing thread failed!`；`--enable-llvm-pgo` 未验证。
 - **未测**：WAMR LLVM JIT（需 `build_llvm.sh` 自编全量 LLVM，收益与 AOT 同源，暂无必要）；E 路冷启动；字符串密集负载在 A/E 两路中的占比。
 
@@ -842,13 +842,13 @@ perry 的行号与内部结构都在变动。本探索记录到的上游位置�
 
 **RQ2（到处运行还剩多少）已经有了明确答案：取决于运行时放在哪一侧。** 把运行时语义留给宿主，等价于要求每个平台重写一套运行时，成本随程序用到的语言特性线性增长（路线一的 C 宿主实测：13 个实现只够纯原始值程序，换成数组立刻报错）。把 perry 的 Rust 运行时按 wasm 目标编译成独立模块、由多模块机制链接，宿主就只剩 WASI 的一个调用（`fd_write`），一次分发这一半成立。代价是运行时的 OS 强耦合模块需要裁剪，且完整 JS 语义（对象、闭包、GC）补齐的量级不变。
 
-性能方面，比数字更值得留下的一条规则是：总倍数必须读作乘性因子的乘积。解释器下 1757× = 引擎因子 35× × codegen 因子 49×（闭合误差 3.1%）；换 AOT 引擎后 104× = 0.97× × 108×（闭合误差 <1%）。引擎因子在 AOT 下归零，干净 wasm 与手写 C 同速。**根因不是引擎，而是 perry wasm codegen 的类型擦除**：`+` 与条件判定被改写为桥调用，桥函数体占 AOT 路耗时的 95.8%，每桥 25.4 ns。三处独立证据支持这一结论：隔离实验（与 perry 相同调用图加平凡被调方只需 1.371 ms）、V8 的 TurboFan 稳态（3.400 ms）、以及 QuickJS 旁证（纯解释器 85.532 ms 比 AOT 执行 perry 装箱字节码还快 0.58×）。
+性能方面，比数字更值得留下的一条规则是：总倍数必须读作乘性因子的乘积。解释器下 1757× = 引擎因子 35× × codegen 因子 49×（闭合误差 3.1%）；换 AOT 引擎后 104× = 0.97× × 108×（闭合误差 <1%）。引擎因子在 AOT 下归零，干净 wasm 与手写 C 同速。**根因不是引擎，而是 perry wasm codegen 的类型擦除**：`+` 与条件判定被改写为桥接调用，桥接函数体占 AOT 路耗时的 95.8%，每次桥接调用 25.4 ns。三处独立证据支持这一结论：隔离实验（与 perry 相同调用图加平凡被调方只需 1.371 ms）、V8 的 TurboFan 稳态（3.400 ms）、以及 QuickJS 旁证（纯解释器 85.532 ms 比 AOT 执行 perry 装箱字节码还快 0.58×）。
 
-修复方面，两条路都验证通过并各自量化。零上游依赖的 wat 后处理 pass 把 bench 从 123.1 ms 降至 16.9 ms（快 7.3×），4 程序 × 7 变体共 28 次逐字节一致、零误判，代价是约 800 行 JS 与随版本回归的维护负担；它的天花板是方法固有的：类型知识在模块里不可恢复时只能保守拒绝（`probe_nested` 保守模式 43% 对 `--closed-world` 86%）。上游 patch 改 `perry-codegen-wasm` 的两个发射点并加一份保守类型事实，把 122.112 ms 降到 **3.891 ms（快 31.4×）**，跨过手工特化上界 17.185 ms，逼近全去盒的 3.325 ms，且 `demo.sh` 6/6、探针逐字节一致。它比手工特化还快 4.4× 的原因，是整条帧建立与内存槽往返都不再发射，而不只是替换了桥调用本身（该归因标注为推断）。
+修复方面，两条路都验证通过并各自量化。零上游依赖的 wat 后处理 pass 把 bench 从 123.1 ms 降至 16.9 ms（快 7.3×），4 程序 × 7 变体共 28 次逐字节一致、零误判，代价是约 800 行 JS 与随版本回归的维护负担；它的天花板是方法固有的：类型知识在模块里不可恢复时只能保守拒绝（`probe_nested` 保守模式 43% 对 `--closed-world` 86%）。上游 patch 改 `perry-codegen-wasm` 的两个发射点并加一份保守类型事实，把 122.112 ms 降到 **3.891 ms（快 31.4×）**，跨过手工特化上界 17.185 ms，逼近完全去装箱的 3.325 ms，且 `demo.sh` 6/6、探针逐字节一致。它比手工特化还快 4.4× 的原因，是整条帧建立与内存槽往返都不再发射，而不只是替换了桥接调用本身（该归因标注为推断）。
 
 方法学上改动最小的一步是**审计自己的基线**。质疑"1.471 ms 物理上不可能"时，正确的回应不是复测一遍，而是查清 1,664,079 次逻辑调用里只有 91,759 次真实 call（gdb 断点与 callgrind 双证）。这条修正没有改变任何数字，只改变了 1757× 的解释方式：基准里的"调用次数"未必是硬件看到的调用次数。
 
-回到开头的论点：这条路可行不可行、慢不慢，可以分开测量；代价拆成引擎与 codegen 两部分，换到 AOT 后引擎那部分归零，剩下的几乎全在 codegen 产出的指令形态上。要把它消除，办法不在运行时这一侧，也不在引擎，而在编译器发射指令的那一步——这正是 6.3 的 patch 所采用的路径。
+回到开头的论点：这条路可行不可行、慢不慢，可以分开测量；代价被拆成引擎与 codegen 两部分；换成 AOT 之后，引擎那一部分归零，剩下的几乎全落在 codegen 产出的指令形态上。要把它消除，办法不在运行时这一侧，也不在引擎，而在编译器发射指令的那一步——这正是 6.3 的 patch 所采用的路径。
 
 ---
 
@@ -918,11 +918,11 @@ perry 的行号与内部结构都在变动。本探索记录到的上游位置�
 |---|---:|---|
 | fib 纯机器码基线 | 1.309 ms | `fib_only.aot` |
 | loop 纯机器码基线（LLVM 常量折叠） | ~0.002 ms | `loop_only.aot` |
-| 桥机制 + 装箱往返税（每层 2 次调用，最小 i64↔f64 往返） | 5.913 ms（税 4.604） | `nohost_box_app.wat` |
+| 桥接机制 + 装箱往返开销（每层 2 次调用，最小 i64↔f64 往返） | 5.913 ms（其中装箱往返开销 4.604） | `nohost_box_app.wat` |
 | rt 侧 `mem_call` 函数体执行 | 135.5 ms | 余项 |
 | **合计** | **141.4 ms** | 闭合 ✓（误差 <0.1%） |
 
-另一写法：1.309 + 4.604 + 135.5 ≈ 141.4 ms，对实测 141.382 ms。每桥成本：rt 函数体 25.4 ns（÷ 5,328,158 桥）、装箱税 1.4 ns（÷ 3,328,158 桥，仅 fib）。
+另一写法：1.309 + 4.604 + 135.5 ≈ 141.4 ms，对实测 141.382 ms。每次桥接调用的成本：rt 函数体 25.4 ns（÷ 5,328,158 次）、装箱开销 1.4 ns（÷ 3,328,158 次，仅 fib）。
 
 ### A.5 基线审计三证据
 
@@ -965,7 +965,7 @@ perry 的行号与内部结构都在变动。本探索记录到的上游位置�
 
 ### A.8 覆盖率与误判
 
-| 程序 | 改写前→后桥调用点 | 保守 | closed-world |
+| 程序 | 改写前→后的桥接调用点 | 保守 | closed-world |
 |---|---|---:|---:|
 | bench | 10 → 6 | 40% | 40% |
 | probe_str | 11 → 6 | 45% | 45% |
@@ -1069,9 +1069,9 @@ mem_call_i32(nameId: i32, argc: i32, base: i32) -> i32
   · 结果直接作为 i32 返回，不写内存
 ```
 
-**桥 nameId 语义**（来自 rt 固定桥表，与数据段字符串序一致，`id = 序 + 1`）
+**桥接调用的 nameId 语义**（来自 rt 固定桥接表，与数据段字符串序一致，`id = 序 + 1`）
 
-| nameId | 桥 | nameId | 桥 |
+| nameId | 桥接 | nameId | 桥接 |
 |---:|---|---:|---|
 | 4 | `console_log` | 10 | `string_len` |
 | 8 | `js_add` | 12 | `is_truthy` |
@@ -1081,16 +1081,16 @@ mem_call_i32(nameId: i32, argc: i32, base: i32) -> i32
 
 **13 个已实现导出**：`string_new`、`console_log`/`console_warn`/`console_error`、`string_concat`、`js_add`、`string_eq`、`js_strict_eq`、`is_truthy`、`string_len`、`jsvalue_to_string`、`mem_call`、`mem_call_i32`。另有 `_initialize`（reactor 入口，WAMR 对带 WASI 导入的模块要求导出）。
 
-**perry 产物的桥发射边界**
+**perry 产物中桥接调用的发射边界**
 
 | 操作 | 路径 |
 |---|---|
-| `+`（js_add） | 过桥 |
+| `+`（js_add） | 走桥接路径 |
 | `-` `*` `/` | 内联 f64.sub/mul/div |
 | `<` `<=` `>` `>=` | 内联 f64.lt/le/gt/ge |
-| if/while/for 条件 | 过桥（is_truthy） |
-| `===` / `==` | 过桥（js_strict_eq） |
-| 字符串操作 / console | 过桥（本来就必须） |
+| if/while/for 条件 | 走桥接路径（is_truthy） |
+| `===` / `==` | 走桥接路径（js_strict_eq） |
+| 字符串操作 / console | 走桥接路径（本来就必须） |
 
 ---
 
@@ -1116,7 +1116,7 @@ mem_call_i32(nameId: i32, argc: i32, base: i32) -> i32
 | `tools/inspect-wasm.mjs` | 产物结构检查 |
 | `tools/bench.sh` | A/B/C 三路对照与输出一致性校验 |
 | `tools/bench_time.c` | A 路进程内计时包装 |
-| `tools/bench_native.c` | C 路基线（经 `volatile` 反折叠） |
+| `tools/bench_native.c` | C 路基线（经 `volatile` 防止常量折叠） |
 | `demo.sh` | 6 步一键演示 |
 
 **归因与修复实验**（`tools/attribution/`）
@@ -1142,18 +1142,18 @@ mem_call_i32(nameId: i32, argc: i32, base: i32) -> i32
 |---|---|
 | 1 | rt 侧分派 + NaN-box 装箱构成每层约 1.2 µs 的大头（未逐项插桩） |
 | 2 | 49× → 108× 的因子变化是分母定义改变的结果，两因子不可直接相除比较 |
-| 3 | wasm 路每语义步指令量约为原生的 10–20 倍（由 35× 与各自 IPC 估算） |
+| 3 | wasm 路每条语义操作的指令数约为原生的 10–20 倍（由 35× 与各自 IPC 估算） |
 | 4 | D 路 fib/循环拆分（约 4 ms / 约 1.5 ms）由指令量比例推算，未单独插桩；D 编译 1.9 s 的耗时构成未拆分 |
-| 5 | nameId 折叠成直接调桥的收益介于 A5 与 B1 之间（只省 dispatch） |
+| 5 | nameId 折叠成直接调用桥接实现的收益介于 A5 与 B1 之间（只省 dispatch） |
 | 6 | B2 的 i64↔f64 reinterpret 对在 LLVM 是空操作、box 本身近零成本 |
 | 7 | V3 与 E′ 的 2.1 ms 差是 LLVM 对 f64 与 i64 fib 的内联/优化差异 |
 | 8 | pass 实现约 10 小时为本次 spike 的实际投入量级估计，非受控工时测量 |
 | 9 | perry codegen 不会把非 number 用于 f64 域运算（依据是它自己无条件内联 F64Sub/Mul/Div） |
 | 10 | 影子栈帧约定（实参 < live sp ≤ 被调方帧）由 4 个程序的产物归纳，未见于上游文档；若某函数入口 `sp -= K`（帧在 live sp 之下）会破坏该约定，实参槽位可能被误判为存活 |
 | 11 | `--closed-world` 的安全性依赖"宿主只调 `_start`" |
-| 12 | B2/V3 与 E′ 之间的差（影子栈内存纪律）沿用实验 B 的推断 |
+| 12 | B2/V3 与 E′ 之间的差（影子栈的内存访问纪律）沿用实验 B 的推断 |
 | 13 | patch 快于 B2 4.4× 的主因是帧建立 + 内存槽往返不再发射 |
-| 14 | `Integer` 字面量与 `Int32` 声明在 wasm 后端一律发射为 f64 位型 |
+| 14 | `Integer` 字面量与 `Int32` 声明在 wasm 后端一律发射为 f64 位模式 |
 | 15 | 影子栈净增减不变的论证基于 sp 配对的源码注释，未逐指令仿真验证 |
 | 16 | typed 签名（I64→F64）在 AOT 下是同位宽 reinterpret 空操作；trampoline 经 wamrc 内联后近零开销 |
 | 17 | 阶段 2/3 的验收 P50（~12–17 ms）为规划值 |
