@@ -1,6 +1,6 @@
 # 性能分析复现指南 (tools/attribution/)
 
-目的：把 A 路 2726× / B 路 842× 拆成乘性因子。全部命令在项目根目录执行。
+目的：把 A 路 2726× / B 路 842× 拆成乘积因子。全部命令在项目根目录执行。
 
 ## 文件
 
@@ -16,19 +16,19 @@
 | `patch_merged.mjs` | wasm-merge 产物后处理: 删 __data_end/__heap_base 导出 + 织入 _start wrapper |
 | `bench_split.c` | 基线审计: fib 与循环拆开计时 (gcc -O2) |
 | `fib_count.c` | 基线审计: fib 入口计数器, 实证 1,664,079 次逻辑调用执行了 |
-| `bench_f64.c` | 基线审计: f64 版 C 基线 (与 perry NaN-box f64 位型同语义) |
+| `bench_f64.c` | 基线审计: f64 版 C 基线 (与 perry NaN-box f64 位模式同语义) |
 | `fib_O2.asm` | gcc -O2 fib 反汇编存档: 161 条指令仅 1 个 call 点 (深度自内联) |
 | `run_node_steady.mjs` | B' 复测: 阶梯预热观察 V8 tier-up 收敛 (默认/--no-liftoff/--liftoff-only) |
-| `nohost_box_app.wat` | 桥机制+装箱税隔离: 与 perry fib 同调用图, call_indirect 防内联 + 最小 NaN-box 往返 |
+| `nohost_box_app.wat` | 桥接机制+NaN-box 往返开销隔离: 与 perry fib 同调用图, call_indirect 防内联 + 最小 NaN-box 往返 |
 | `nohost_triv_nomem.wat` | nohost_triv 无 memory 变体 (供 wasm-merge 单 memory 合并) |
 | `bench_exec_wrap.c` | 通用 argv 进程级 fork/exec 计时 (bench_perry_wrap 不支持 argv, F 路用) |
 | `bench_quickjs.js` | F 路基准: 与 src/bench.ts 同算法同输出 (QuickJS 解释执行 JS) |
-| `exp_wasmopt.sh` | 实验 A: wasm-opt 后处理能否内联/折叠桥 (122.1→93.5 ms, 卡点=NAME_CACHE 内存 load) |
+| `exp_wasmopt.sh` | 实验 A: wasm-opt 后处理能否内联/折叠桥接调用 (122.1→93.5 ms, 卡点=NAME_CACHE 内存 load) |
 | `spec_patch.py` | 实验 B: B1/B2 等价手工类型特化生成器 (从 build/bench_merged_patched.wat) |
 | `exp_specialize.sh` | 实验 B 一键复现: B1(+内联)=71.6 / B2(全内联)=17.2 / V3 纯 f64=3.3 ms |
-| `specialized_bench_f64.wat` | V3: 纯 f64、无 NaN-box、无影子栈 ("全去盒"版天花板) |
+| `specialized_bench_f64.wat` | V3: 纯 f64、无 NaN-box、无影子栈 ("无包装的表示"版天花板) |
 | `switch_recon/` | 编译开关侦察: 逐项实测 perry CLI / 环境变量 / `@typerry/node` / wamrc 全部性能开关。结论 perry 侧无开关, wamrc 仅 `--enable-segue` 有效 (−18.3%)。见其 `README.md` + `REPORT.md` |
-| `bridge_inline_pass.mjs` | **通用桥内联 pass**（零上游依赖）: wat→wat 抽象解释恢复类型（NUM/BOOLBOX/OTHER + 跨过程不动点），把可证 number 的 `js_add` 内联成 `f64.add`、可证二值盒布尔的 `is_truthy` 内联成 `i64.ne TAG_FALSE`，其余桥原样保留。`--closed-world` 视导出函数为模块内私有。自报覆盖率 JSON |
+| `bridge_inline_pass.mjs` | **通用桥内联 pass**（零上游依赖）: wat→wat 抽象解释恢复类型（NUM/BOOLBOX/OTHER + 跨过程不动点），把可证 number 的 `js_add` 内联成 `f64.add`、可证二值包装的布尔的 `is_truthy` 内联成 `i64.ne TAG_FALSE`，其余桥接调用原样保留。`--closed-world` 视导出函数为模块内私有。自报覆盖率 JSON |
 | `exp_postpass.sh` | 后处理 pass 一键复现 + 泛化验证: 完整 E 路链路 → pass → 7 变体 → 逐字节正确性 → 覆盖率 → P50。`tools/attribution/exp_postpass.sh all` |
 | `probe_ref.mjs` | 生成 perry JS 宿主层参照（`wasmBoot` 的 `run.mjs`），供逐字节比对 |
 | `probes/` | 泛化探针: `probe_str.ts`（字符串密集）/ `probe_mixed.ts`（混合类型）/ `probe_nested.ts`（跨函数） |
@@ -42,7 +42,7 @@ tools/attribution/exp_postpass.sh all    # 通用桥内联 pass: 4 程序 × 7 �
 ```
 
 结论速览 (详见 docs/performance.md「修复路径与天花板」节):
-- A: 强制 always-inline 能内联整条桥, 但 NAME_CACHE 运行时内存 load 挡住 switch 折叠,
+- A: 强制 always-inline 能内联整条桥接调用, 但 NAME_CACHE 运行时内存 load 挡住 switch 折叠,
   P50 122.1→93.5 ms (-23%), 到不了特化量级
 - B: 热路径 `+`/条件内联 (等价手工特化) → B1 71.6 ms, B2 17.2 ms (E×0.141, 快 7.1×)
 - B2 是"保留 NaN-box + 影子栈"的 codegen 特化上限; B2→E'(1.2 ms) 的余量是影子栈
@@ -102,7 +102,7 @@ node node_modules/.bin/wasm-merge build/nohost_app.wasm app build/nohost_triv_no
 ./build/aot_time build/nohost_merged.aot 5 | grep RUN      # 直接调用(内联吸收) ≈ 1.4 ms
 $WABT/wat2wasm --enable-all tools/attribution/nohost_box_app.wat -o build/nohost_box_app.wasm
 /tmp/wamrc-test/wamrc --opt-level=3 -o build/nohost_box_app.aot build/nohost_box_app.wasm
-./build/aot_time build/nohost_box_app.aot 8 | grep RUN    # call_indirect+装箱 ≈ 5.9 ms
+./build/aot_time build/nohost_box_app.aot 8 | grep RUN    # call_indirect+NaN-box 往返 ≈ 5.9 ms
 ./build/aot_time build/fib_only.aot 5 | grep RUN          # 纯机 fib ≈ 1.3 ms (闭合用)
 ```
 
@@ -113,7 +113,7 @@ $WABT/wat2wasm --enable-all tools/attribution/nohost_box_app.wat -o build/nohost
 | 原生同形 (gcc -O2, i64) | 1.47 ms | fib 0.967 + 循环 0.50 |
 | 干净 wasm × WAMR (A') | 50.8 ms | fib 43.0 + 循环 5.4 → 解释器因子 ~35× |
 | 干净 wasm × node V8 (B') | 4.9 ms | fib 2.32 + 循环 0.36 → V8 因子 ~3.3× |
-| perry wasm × WAMR (A) | 4010 ms | → codegen 因子 4010/50.8 ≈ 79×；35×79≈2730 闭合 2726 |
+| perry wasm × WAMR (A) | 4010 ms | → codegen 因子 4010/50.8 ≈ 79×；34.6×78.9≈2730 闭合 2726 |
 | perry wasm × node (B) | 1239 ms | → codegen+宿主因子 ≈ 253×；3.3×253≈835 闭合 842 |
 | perry wasm × WAMR AOT (E) | 146.8 ms | 合并单模块 .aot → codegen 因子 ≈108×；0.97×108 闭合 104.4 |
 | 干净 wasm × WAMR AOT (E') | 1.36 ms | ≈原生同速 → AOT 引擎因子 ~1×（解释器 35× 归零） |
@@ -126,8 +126,8 @@ $WABT/wat2wasm --enable-all tools/attribution/nohost_box_app.wat -o build/nohost
 | D 纯执行 | 1.6–2.6 ms | callgrind 19.44 M Ir 换算；D/C 纯执行 1.2–1.9×，E/D 纯执行 54–88× |
 | 合并成本 | 无 | 解释器跑合并 2340–2390 vs 双模块 2372–2480 ms |
 | wamrc 优化级 | 确认默认 O3 | O0 对照 E 390.8 vs O3 141.4 ms |
-| E 每桥成本 | rt 25.4 ns + 装箱 1.4 ns | nohost_box 隔离；E 闭合 1.31+4.60+135.5=141.4 ✓ |
-| F. QuickJS | 85.532 ms | fib 61.7 + loop 24.8；F 比 E 快 0.58×（旁证 E 慢在桥形态） |
+| E 每次桥接调用成本 | rt 25.4 ns + NaN-box 开销 1.4 ns | nohost_box 隔离；E 闭合 1.31+4.60+135.5=141.4 ✓ |
+| F. QuickJS | 85.532 ms | fib 61.7 + loop 24.8；F 比 E 快 0.58×（旁证 E 慢在桥接形态） |
 
 
 未完成：minhost（JS 最小桩跑 perry wasm）实验因桩语义复杂超时放弃，B 路 364×
