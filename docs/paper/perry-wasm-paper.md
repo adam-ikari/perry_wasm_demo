@@ -201,6 +201,24 @@ func[1] sig=2 <rt.console_log> <- rt.console_log
 ```
 
 211 个导入均绑定于 `rt` 模块。也就是说，宿主要让它运行，就必须将这 211 个函数全部提供，哪怕真正会被调用的只有三个。
+这 211 个不是按程序需要声明，而是 perry 一次铺开的固定接口面——任何
+perry 编译的 wasm 都带这套导入，与程序用没用无关（`docs/perry-wasm-wamr.md`：
+"perry 把整个运行时接口一次性声明进去，不管你的程序用不用"）。其能力按
+导入名前缀分布，下面是 198 个桩的逐族计数（来源 `build/rt_symbols.rs`，
+即 `tools/gen-rt-symbols.mjs` 从导入段生成的符号表）：
+
+| 导入名前缀 | 桩 | 导入名前缀 | 桩 |
+|---|---:|---|---:|
+| `array_*` | 28 | `date_*` | 12 |
+| `string_*` | 17 | `url_*` | 10 |
+| `buffer_*` | 13 | `set_*` | 10 |
+| `object_*` | 12 | `map_*` | 10 |
+| `math_*` | 12 | `class_*` | 9 |
+| `closure_*` | 7 | `crypto_*` | 4 |
+
+其余分散在 `searchparams_*`/`response_*`/`path_*`（各 6）、`uint8array_*`
+（5）、`promise_*`（3）及 `json_*`/`fetch_*`/`regexp_*`/`process_*` 等更小族。
+13 个真实现分属 `string_*`/`console_*`/`js_*`/`is_*`/`mem_*`（清单见附录 C）。
 
 RQ1 的答案有一部分是肯定的。
 查 `app.wasm` 的段表，
@@ -298,6 +316,50 @@ MEMCALL console_log args=["fib(0..19) sum = 10945"]
   返回值也写回 `base`（函数本身返回 0.0 占位，宿主层源码注释说明了这点）；
   `mem_call_i32` 同理，只是结果直接作为 i32 返回，不写内存。至于为什么不直接按 f64 传参、要绕一趟内存，源码没有解释；
   本文作者的判断是 f64 过 FFI 边界时 NaN 位模式有被规范化的风险，两边都按 u64 读写原始位模式最稳妥。这条判断属于推断，文档里没有给出依据。
+
+### 3.3.1 rt.* 的层次与 mem_call 分派内幕
+
+先回答一个自然疑问：这 211 个函数为什么不做成 WASI？两者不在同一层。
+WASI（preview1）是系统调用级接口——`fd_write`、`clock_time_get`、
+`random_get`、`path_open`，形态统一成"(指针, 长度, …) → errno"，操作对象
+是字节缓冲与资源句柄。`rt.*` 给的是**语言运行时**：字符串表、NaN-boxed 值
+的编解码、对象/数组的 handle store，外加一个按名字动态分派的 `mem_call`
+入口。WASI 里既没有"字符串"这个概念，也没有堆对象、属性与原型链
+（`docs/perry-wasm-wamr.md` "`rt.*` 为什么不是 WASI" 节）。两处硬冲突：
+其一，211 个签名只描述位宽（`string_len: (i64) -> i64`、
+`console_log: (i64) -> ()`），i64 里装的是 f64 位模式加高 16 位标签，
+wasm 类型系统只看到 i64，看不到"这是字符串 id 还是 number"——WASI 的
+强类型加资源语义套不上这套私有编码；其二，动态分派靠运行时按名查表，
+不是编译期定死的符号导入。所以准确说法不是"不能 WASI 兼容"，而是
+**WASI 在 `rt` 的下面一层**：`rt` 是语言运行时，WASI 是系统调用。本 demo
+里运行时模块的 console 输出最终落到底层的 `fd_write`，正是这个层次关系
+的直接验证（见 3.4）。
+
+那么 211 个导入在运行时怎么被用？§3.3 的插桩已给出一个反直觉的事实：
+真正被 call 的导入只有 `string_new`、`mem_call`、`mem_call_i32` 三个。
+原因是 perry codegen 把所有动态操作（`+`、条件判定、`===`、字符串拼接、
+console 输出、`.length`）统一发射成 `mem_call(nameId, argc, base)` 或
+`mem_call_i32(...)`，而不是直接 `call` 各导入名（codegen 证据见
+`tools/attribution/rt_fast/probe_nameid.md`：`BinaryOp::Add =>
+emit_memcall(func, "js_add", 2)`，if/while/for 条件
+`emit_memcall_i32(func, "is_truthy", 1)`）。于是出现一种"双重存在"：
+`console_log`、`js_add`、`string_eq`、`is_truthy` 等 10 个操作，在 `rt.wasm`
+里既作为直接导出函数存在（满足实例化时的导入解析——211 个少一个都不行），
+又作为 `BRIDGES` 常量表（`runtime-wasm/src/lib.rs`，10 个名字）的条目，
+由 `mem_call` 内部按名字分派到同一份实现。直接导出在运行时几乎不被
+call，它的职责是让导入段可解析；真正执行走的是 `mem_call` → `BRIDGES`
+→ 同一函数体。
+
+`mem_call` 的分派路径（`runtime-wasm/src/lib.rs` 的 `invoke()`）如下：先按
+`nameId` 查 `NAME_CACHE`（`[u8; 64]`，0xFF = 未缓存）直取桥索引，命中即
+跳过扫描；未命中则按 `nameId` 取字符串表里对应的名字字节串（§3.3 字符串
+表契约），再对 10 项 `BRIDGES` 逐项 `memcmp` 线性匹配，命中后回填缓存。
+参数从业务线性内存 `base + i*8` 处按 `u64::from_le` 读出、`decode` 成内部
+`V` 枚举；结果 `encode` 回写 `base`（`mem_call`）或直接作 i32 返回
+（`mem_call_i32`）。`NAME_CACHE` 是 2026-09 采纳的优化：消除热路径上对
+10 项 `BRIDGES` 的按名线性扫描（见 4.4 的 nameId 缓存直查）。查不到名字
+的 `nameId` 走 `perry_rt_unimplemented` 路径：写 stderr 实名报错后
+`unreachable()` trap——与 198 个桩的处置一致（见 3.2）。
 
 ### 3.4 多模块链接与 WASI-only 宿主
 
