@@ -1,7 +1,5 @@
 # 把 TypeScript 编译成 WebAssembly 并在无 JS 引擎的宿主上运行
 
-**探索 perry 编译为 wasm 的可能性，以及途中发现的性能异常与修复**
-
 **Compiling TypeScript to WebAssembly and Running It on a Host Without a
  JavaScript Engine:
 A Systematic Exploration from Runtime Modularization through Performance
@@ -9,10 +7,6 @@ A Systematic Exploration from Runtime Modularization through Performance
 
 **作者：** Adam
 **日期：** 2026-09-21
-**材料来源：** 本仓库 `docs/`、`tools/`、`src/`、`host/`、`runtime-wasm/` 的一手实测记录；
-上游仓库 [PerryTS/perry](https://github.com/PerryTS/perry)、
-[fn-a/typerry](https://github.com/fn-a/typerry)、
-[bytecodealliance/wasm-micro-runtime](https://github.com/bytecodealliance/wasm-micro-runtime)。
 
 ---
 
@@ -1368,18 +1362,7 @@ typed ABI 规划文档也说明其全部 file:line 已对 `/tmp/perry-src` HEAD 
 
 ---
 
-## 材料来源
-
-本文不引外部文献，正文也不带编号引用：每个数字、结论与限定词都就地写明，读正文无需回查材料。
-
-**仓库内材料**
-
-以下材料的内容已整合进本文正文及附录（附录 C–G），原文件随之删除。
-
-- `README.md` — 项目总览、目录结构、实测输出、互操作约定与约束。
-- `tools/attribution/patch_notes.md` — 上游 patch 的设计说明、逐处语义与等价性论证、实测结果与遗留风险。
-- `tools/attribution/switch_recon/` — 编译开关侦察记录（见附录 F.11）。
-- `src/bench.ts` — 基准程序（20 行）。
+## 上游项目
 
 **上游仓库与产物**
 
