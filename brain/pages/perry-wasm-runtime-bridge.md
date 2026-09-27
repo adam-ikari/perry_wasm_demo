@@ -5,7 +5,7 @@ category: concept
 status: active
 tags: [perry, wasm, wamr, abi]
 created: "2026-09-15T05:11:48"
-updated: "2026-09-27T05:10:45"
+updated: "2026-09-27T09:35:36"
 ---
 
 <!-- compiled_truth -->
@@ -22,20 +22,20 @@ perry 的 wasm 后端产出的模块声明 211 个 `rt.*` 导入，把"运行时
 
 ## 路线四（已验证）：直接复用 perry-runtime 源码编译进 wasm
 
-不再手写 `rt.*` 桩，而是把 `crates/perry-runtime` 作为 path 依赖，编成 `wasm32-wasip1` cdylib，用薄适配层把 `rt.*` 转发到 `js_*`。**已实测成立**（探针 `/tmp/reuse-probe`，WAMR iwasm 2.4.3）：
+不再手写 `rt.*` 桩，而是把 `crates/perry-runtime` 作为 path 依赖，编成 `wasm32-wasip1` cdylib，用薄适配层把 `rt.*` 转发到 `js_*`。**已实测成立**（2026-09-27 入库 `tools/route4/`：一键 `build.sh` 五步构建 + `verify.mjs` 五组断言全绿；WAMR iwasm 2.4.3）：
 
 - **链接可行**：`use perry_runtime::builtins::js_add; use perry_runtime::value::{js_is_truthy, JSValue};` 走 Rust 路径引用即可把 rlib 成员拉入；**仅用 `extern "C"` 块声明符号会被留在 wasm 导入段**（rlib 成员不拉入），这是第一个坑。
 - **自包含**：模块 imports 从 39 降到 28，**28 个全部是 `wasi_snapshot_preview1.*`，零非 WASI 导入**。做法是适配层自实现 `setjmp`/`longjmp`/`perry_sjlj_try` + 8 个 `_Unwind_*`。
-- **功能实证**：`iwasm -f rt_is_truthy <w> 0` → `0x0`；`… 1.0` → `0x1`；`iwasm -f rt_js_add <w> 2.0 3.0` → `0x4014000000000000`（=5.0）。perry 自家 Rust 运行时语义在 wasm 里真实执行。
+- **功能实证**（2026-09-27 复跑，`verify.mjs` 第 5 步同组探针；导出名是 `rt.*` 的字段名、无 `rt_` 前缀，i64 入参只接受整数或十六进制位型，十进制浮点会被 iwasm 的 strtoull 拒绝）：`iwasm -f is_truthy build/rt4.wasm 0` → `0x0:i32`；入参 `0x3FF0000000000000`（f64 1.0 的位型）→ `0x1:i32`；`iwasm -f js_add build/rt4.wasm 0x4000000000000000 0x4008000000000000`（2.0 与 3.0 的位型）→ `0x4014000000000000:i64`（=5.0）。perry 自家 Rust 运行时语义在 wasm 里真实执行。
 - **EH 桩是链接期残留、非运行期需求**：perry `build.rs` 明写 *wasm32 has no C setjmp trampoline: the wasm backend routes try/catch through host imports, so the Rust-side transport never arms one*；wasm 下 try/catch 走 `rt.try_start`/`rt.try_end` 宿主导入，`_Unwind_*` 永不被调用。
 - **ABI 天然对齐**：perry-runtime 与 `rt.*` 的 NaN-box tag 完全一致（`0x7FFC` singleton / `0x7FFD` pointer / `0x7FFE` int32）。**唯一差异**是 `0x7FFF` 字符串低 48 位：`rt.*` 是字符串表下标，perry-runtime 是内存指针 → 适配层需建 index↔pointer 双向表。
-- **覆盖度**：198 个 `rt.*` 中，150 个与 `js_*` 同名/近名直连，另 16 个有不同名但存在的对应实现（如 `array_new`→`js_array_alloc`、`object_new`→`js_object_alloc`、`map_new`→`js_map_alloc`、`js_typeof`→`js_value_typeof`、`closure_new`→`js_closure_alloc`），合计 **166 / 198 ≈ 84%**。
-- **无对应者 31 个**，且都是"本就不该在运行时里"的：Math 内建 4（native codegen 内联为 wasm 指令，运行时不提供）、Web API 13（fetch/Response/URLSearchParams，本就在宿主边界外）、Crypto 4（依赖 native 库）、try/catch 2（按设计走宿主导入）、零散 8。
-- **适配层端到端（2026-09-26，`/tmp/rt4`）**：13 个真实桥的值语义全部换成 perry-runtime 导出后，demo 正向 5 行与参照逐字节一致、负向 `array_new` 实名报错退出码 1、导入段 28 项全 WASI。
-- **代价**：体积 16,928 B → 7,298,105 B（约 430×；探针形态 6.73 MB，均未 strip/未裁剪）；同一 `bench.wasm` 15 样本 P50 路线三 103.638 ms vs 路线四 112.489 ms = **1.09×**（成因归于 StringHeader 指针层与 `RuntimeHandleScope`/thread-local rooting，未逐项插桩）；另有一次性 INIT 段 252 ms（路线三无）。多模块共享下体积可摊薄。
-- **边界**：性能矩阵全部仍只来自路线三；路线四只过了 13 个桥的值语义 + 单基准计时，AOT 形态、31 个缺口、非 fib 负载下的 1.09× 均未测。
+- **覆盖度**（`tools/route4/coverage.mjs` 名层三层可复算，2026-09-27）：198 个 `rt.*` 中，122 个同名直连（direct，`js_<桩名>` 精确命中）、27 个近名直连（near，去下划线归一或同词干，如 `closure_call_0`→`js_closure_call0`）、30 个有异名但存在的对应实现（alias，如 `array_new`→`js_array_alloc`、`js_typeof`→`js_value_typeof`、`class_call_method`→`js_native_call_method`、`searchparams_get`→`js_url_search_params_get`），合计 **179 / 198 ≈ 90%（名层口径：上游源码有对应符号 ≠ 适配层已接通）**。
+- **无对应者 19 个**（名层），且都是"本就不该在运行时里"的：Math 内建 4（native codegen 内联为 wasm 指令，适配层已就地用 `f64::floor` 等改写）、Web API 7（`response_*` 6 个无专用取值符号、`fetch_url` 真身在 perry-stdlib/宿主网络）、Crypto 4（依赖 native 库）、try/catch 2（按设计走宿主导入）、零散 2（`string_includes`、`is_null_or_undefined`，后者已就地改写）。其中 5 个已就地改写，14 个仍待实现。
+- **适配层端到端（2026-09-26 实测，2026-09-27 入库复跑）**：适配层共实现 29 个 `rt.*`（13 桥全部转成 perry-runtime 导出 + 16 个原桩补实现：11 个转发上游符号、5 个就地改写），其余 182 个仍是报错桩；demo 正向 5 行与参照逐字节一致、负向 `array_new` 实名报错退出码 1、导入段 28 项全 WASI。demo 在路线三下即已通过（彼时 198 桩全是 trap），故其执行路径只触及这 13 个桥——覆盖度是名层潜力、不是运行期已接通数。
+- **代价**：体积 16,928 B → 7,298,105 B（约 430×；入库构建 7,314,044 B，源码在 `.deps/perry-src`，与 /tmp 路径产物差 15,939 B = Data 段 334 条 panic location 绝对路径，不是代码差异）；同一 `bench.wasm` 15 样本 P50 路线三 103.638 ms vs 路线四 112.489 ms = **1.09×**（成因归于 StringHeader 指针层与 `RuntimeHandleScope`/thread-local rooting，未逐项插桩）；另有一次性 INIT 段 252 ms（路线三无）。多模块共享下体积可摊薄。
+- **边界**：性能矩阵全部仍只来自路线三；路线四只过了 13 个桥的值语义 + 单基准计时，AOT 形态、14 个名层无对应缺口的接法、非 fib 负载下的 1.09× 均未测。
 
-结论：把 perry 的 JS 运行时"完整"放进 wasm 在链接与执行层面已无阻塞；剩余工作是把 166 个直连 + 31 个缺口逐个接完，缺口多数需要宿主侧实现或按 wasm 语义改写，而非运行时复用问题。
+结论：把 perry 的 JS 运行时"完整"放进 wasm 在链接与执行层面已无阻塞；剩余 182 个桩分两段——168 个上游有对应实现、接线是搬运（多数只差参数整形），14 个名层无对应才需要宿主侧实现或按 wasm 语义改写（该类共 19 个，已就地改写 5 个）；缺口是接线量问题，而非运行时复用问题。
 
 ## 测量修正：NAME_CACHE 缓存降幅（2026-09-26 复测）
 
@@ -49,9 +49,7 @@ perry 的 wasm 后端产出的模块声明 211 个 `rt.*` 导入，把"运行时
 
 `.so` 导出 `get_native_lib()` 返回模块名 `"rt"` 与 `NativeSymbol[]`；`iwasm --native-lib=…`。原生函数首参为公开类型 `wasm_exec_env_t`；iwasm 需用 `-Wl,--export-dynamic` 构建，否则宿主库解析不到 `wasm_runtime_*`。未实现的导入一律抛 `Exception: bridge function '<name>' is not implemented`（退出码 1），不返回假数据。产物 `app.wasm` 只有 11 个段、无 name 自定义段，函数名与局部变量名不泄漏。
 
-
-
-论文 `docs/paper/perry-wasm-paper.md` 已完成四条实验 + 复测修正的整合，提交 `81d828b`（2026-09-27）。
+论文 `docs/paper/perry-wasm-paper.md` 已完成四条实验 + 复测修正的整合，提交 `81d828b`；2026-09-27 追加修订：覆盖度改 179/198（名层口径，coverage.mjs 可复算）、语义命令改可复现形式（iwasm -f + 十六进制位型）、`tools/route4/` 入库与 F.13 改写，提交 `6536749`。
 
 
 ## Timeline
@@ -162,4 +160,16 @@ perry 的 wasm 后端产出的模块声明 211 个 `rt.*` 导入，把"运行时
   kind: decision
   summary: "compiled_truth 增补: 路线四适配层端到端(13桥值语义全换, 正负向一致, 导入28全WASI)与代价(16,928→7,298,105 B≈430×, 单基准 103.638 vs 112.489=1.09×, INIT 252ms)及性能边界(矩阵仍只来自路线三); 新增「测量修正」节: nameId 缓存交错降幅 2.7%(110.893 vs 113.929, n=15), −43% 降级为 2026-09-19 当日环境读数不可外推; 论文整合已提交 81d828b"
   source: "2026-09-24/26 四条实验 + 论文整合提交 81d828b"
+  affects: [perry-wasm-runtime-bridge]
+
+- time: 2026-09-27T09:35:36
+  kind: decision
+  summary: "compiled_truth 修订(2026-09-27): 覆盖度 166/198(84%) 修正为 179/198(90% 名层三层口径, tools/route4/coverage.mjs 可复算, direct 122/near 27/alias 30), 无对应者 31→19(5 已就地改写/14 待实现), 写入 29 实现/182 桩的接线事实与名层≠已接通边界; 语义命令换可复现形式(iwasm -f is_truthy/js_add + 十六进制位型, 导出名无 rt_ 前缀); 探针入库 tools/route4/(build.sh+verify.mjs 全绿); 产物双口径 7,314,044 B(.deps) vs 7,298,105 B(/tmp); 论文对应修订提交 6536749"
+  source: "tools/route4/{coverage,verify}.mjs + build.sh 实测 (2026-09-27) + 论文 6536749"
+  affects: [perry-wasm-runtime-bridge]
+
+- time: 2026-09-27T09:35:36
+  kind: reversal
+  summary: "推翻两条 2026-09-24/26 期间的结论: (1) 覆盖度 166/198≈84% 不成立——原脚本不可复现且算术 150+16+31≠198, 实际名层三层比对为 179/198≈90% (direct 122/near 27/alias 30, 异名表 22→30 条), 余 19 而非 31 (URLSearchParams 6 条有 js_url_search_params_* 对应, 从缺口移入 alias); (2) 语义探针命令 iwasm -f rt_is_truthy … 1.0 / rt_js_add 2.0 3.0 不可复现——rt4 导出名无 rt_ 前缀且 i64 入参不接受十进制浮点(strtoull 拒绝), 换成 is_truthy 0/0x3FF0000000000000 与 js_add 0x4000000000000000 0x4008000000000000 三条位型探针, verify.mjs 第 5 步 2026-09-27 复跑通过"
+  source: "coverage.mjs 三层判定 + iwasm 2.4.3 实测 + 论文 6536749"
   affects: [perry-wasm-runtime-bridge]
