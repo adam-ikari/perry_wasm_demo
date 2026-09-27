@@ -8,10 +8,11 @@
 #      E/E'   -> tools/attribution/aot_e.sh 12     (WAMR AOT, 含 wamrc/AOT 运行时构建)
 #      F      -> tools/attribution/bench_f.sh 11   (QuickJS)
 #    本 workflow 只负责把依赖装到与本地相同的路径, 再原样调用这几个脚本 —— 步骤与本地
-#    脚本的逐条对应关系见下方各 step 注释, 以及 docs/process.md「增补：性能测试迁移到 CI」。
+#    脚本的逐条对应关系见下方各 step 注释, 以及 docs/paper/perry-wasm-paper.md 附录 F.9
+#    「CI 环境与回归判定」。
 #
 # 2. runner 选 ubuntu-22.04 + LLVM 14:
-#    - docs/performance.md「测量口径」的基线机就是 Ubuntu 22.04 系 (gcc 11.4.0), LLVM 14
+#    - docs/paper/perry-wasm-paper.md §4.2「测量纪律」的基线机就是 Ubuntu 22.04 系 (gcc 11.4.0), LLVM 14
 #      (wamrc 2.4.3 用系统 LLVM 14 构建, `llvm-config --version` = 14.0.0)。
 #    - WAMR 2.4.3 源码有 `#if LLVM_VERSION_MAJOR >= 19 / >= 17 / >= 14` 等守卫, LLVM 18
 #      (ubuntu-24.04 默认) 理论可编译; 但 tools/attribution/aot_e.sh 第 38-40 行硬编码
@@ -26,9 +27,10 @@
 #      噪声数据。需要夜间基线时, 取消 on: 里注释掉的 schedule/push 段。
 #
 # 4. 回归判定口径: CI runner 与本机 CPU 不同, 绝对毫秒不可比 → 只比
-#    "各目标 ÷ C (原生) 的倍数" (跨机可比的形态比率), 与 docs/performance.md 记录的
-#    本机比率对照, ±50% 阈值内 ok、超出仅 warning 不 fail (由 tools/ci/collect-bench.mjs
-#    汇总成 build/bench-results.json; 首次运行即把本次比率当作 CI 基线随 artifact 存档)。
+#    "各目标 ÷ C (原生) 的倍数" (跨机可比的形态比率), 与 docs/paper/perry-wasm-paper.md §4.3
+#    「结果」六路总表记录的本机比率对照, ±50% 阈值内 ok、超出仅 warning 不 fail (由
+#    tools/ci/collect-bench.mjs 汇总成 build/bench-results.json; 首次运行即把本次比率当作 CI
+#    基线随 artifact 存档)。
 #
 # 5. 超时: 冷跑 (无任何缓存) 估 15~30 分钟 (WAMR 双构建 + wamrc + 625MB perry 下载 +
 #    六路计时); timeout-minutes 是上限不是预约, 设 60 留余量。
@@ -141,7 +143,8 @@ jobs:
         run: ./demo.sh
 
       - name: wamrc (AOT 编译器, 系统 LLVM 14)
-        # 等价于 docs/performance.md「E 手动步骤」+ aot_e.sh 第 24-31 行注释的命令:
+        # 等价于 docs/paper/perry-wasm-paper.md 附录 B「E. WAMR AOT」一键步骤 + aot_e.sh
+        # 第 24-31 行注释的命令:
         #   cmake -S .deps/wamr/wamr-compiler -B /tmp/wamrc-test -DWAMR_BUILD_WITH_CUSTOM_LLVM=1
         #   && cmake --build /tmp/wamrc-test -j
         # 差异: 显式 -DLLVM_DIR="$(llvm-config-14 --cmakedir)" —— ubuntu 多 LLVM 并存时
@@ -156,7 +159,8 @@ jobs:
           /tmp/wamrc-test/wamrc --version
 
       - name: QuickJS (F 路)
-        # 等价于 attribution/README.md + bench_f.sh 第 15 行 QJS 默认路径:
+        # 等价于 docs/paper/perry-wasm-paper.md 附录 B「F. QuickJS 对照」+ bench_f.sh 第 15 行
+        # QJS 默认路径:
         #   克隆 bellard 官方 quickjs 到 /tmp/quickjs-bellard, `make qjs` 只建解释器不装系统。
         # (任务书写 /tmp/quickjs; 这里用脚本默认 /tmp/quickjs-bellard, 少一个环境变量)
         run: |

@@ -5,7 +5,7 @@
 # 背景：WAMR AOT 文件格式不支持 import memory（aot_emit_aot_file.c 硬编码
 # import_memory_count=0 + aot_validator.c 拒绝），demo 的双模块结构（app import
 # rt.memory）无法整体 AOT。方案：wasm-merge（binaryen）把 app+rt 合并成单模块，
-# wamrc 编译成 .aot，用 AOT 构建的 libiwasm.a 计时。详见 docs/performance.md E 路小节。
+# wamrc 编译成 .aot，用 AOT 构建的 libiwasm.a 计时。详见 docs/paper/perry-wasm-paper.md §3.5 与 §4.2「E 路」口径。
 #
 # 用法: tools/attribution/aot_e.sh [runs]   # 默认 12（第 1 轮 warmup 弃，取 11 样本中位数）
 set -euo pipefail

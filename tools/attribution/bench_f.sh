@@ -15,7 +15,7 @@ BUILD="$ROOT/build"
 QJS="${QJS:-/tmp/quickjs-bellard/qjs}"
 RUNS="${1:-11}"
 
-[ -x "$QJS" ] || { echo "缺 qjs ($QJS) — 按 attribution/README.md 构建 Bellard quickjs"; exit 1; }
+[ -x "$QJS" ] || { echo "缺 qjs ($QJS) — 按 docs/paper/perry-wasm-paper.md 附录 B「F. QuickJS 对照」构建 Bellard quickjs"; exit 1; }
 [ -x "$BUILD/bench_exec_wrap" ] || {
   gcc -O2 -Wall -Wextra -o "$BUILD/bench_exec_wrap" \
     "$ROOT/tools/attribution/bench_exec_wrap.c"; }

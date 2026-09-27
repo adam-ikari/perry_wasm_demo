@@ -37,10 +37,11 @@ import { fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const buildDir = join(root, 'build');
 
-// 文档基线（docs/performance.md「六路对照总表」/「结论先行」, 本机 AMD Ryzen 7 5800H,
-// 2026-09-19/21 实测）: 各目标中位数 ÷ C 原生中位数。仅作提示性对照, 不作断言。
+// 文档基线（docs/paper/perry-wasm-paper.md §4.3「结果」六路总表 / 中文摘要「第二段」,
+// 本机 AMD Ryzen 7 5800H, 2026-09-19/21 实测）: 各目标中位数 ÷ C 原生中位数。仅作提示性对照,
+// 不作断言。
 const DOC_BASELINE = {
-  source: 'docs/performance.md 六路对照总表（本机 AMD Ryzen 7 5800H, 2026-09-21）',
+  source: 'docs/paper/perry-wasm-paper.md §4.3 六路总表（本机 AMD Ryzen 7 5800H, 2026-09-21）',
   ratios: { a: 1757, b: 910, c: 1, d: 4.5, e: 104, eprime: 0.97, f: 61 },
 };
 
@@ -207,7 +208,7 @@ const results = {
   notes: [
     'CI runner CPU 与本机（文档基线机 AMD Ryzen 7 5800H）不同, 绝对毫秒不可跨机比较; 回归判定只用 ratio_vs_c。',
     'CI runner 为共享虚拟机, 噪声大于本机 ±15%; ±50% 阈值外的偏差只 warning 不 fail。',
-    '文档 docs/performance.md 保留本机历史数值; 本文件是 CI 侧基线（首次运行即建立）。',
+    '论文 docs/paper/perry-wasm-paper.md 附录 A 保留本机历史数值; 本文件是 CI 侧基线（首次运行即建立）。',
   ],
 };
 

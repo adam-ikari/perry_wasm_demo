@@ -238,7 +238,7 @@ bash /tmp/rc_work/perry_cli.sh     # perry CLI flag/env 扫描
 | `-O3`（对 clean 对照） | 1.372 | — | ➖ |
 
 `wasm-opt` 拿 `--enable-bulk-memory --enable-nontrapping-float-to-int --enable-multimemory --enable-reference-types` 才吃这份模块。
-结论：**wasm-opt 预处理对 perry 产物没有实质收益**（与 `docs/performance.md` 里 wamrc O3 已最优的判断一致）。
+结论：**wasm-opt 预处理对 perry 产物没有实质收益**（与 `docs/paper/perry-wasm-paper.md` §4.4 审计中 wamrc O3 已最优的判断一致）。
 
 ---
 

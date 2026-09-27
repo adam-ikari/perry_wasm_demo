@@ -1,6 +1,6 @@
 # 算术过桥实验（rt_fast 快速分派 + codegen 形态取证）
 
-对应 docs/performance.md「算术过桥问题」小节。全部命令在项目根目录执行。
+对应 docs/paper/perry-wasm-paper.md §6.1「问题定位：可内联的算术被改写为桥接调用」。全部命令在项目根目录执行。
 
 ## 问题
 

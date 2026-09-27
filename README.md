@@ -22,7 +22,7 @@ src/app.ts ──perry──► build/app.wasm ──import rt.memory + 211 个 
 | `tools/patch-app-memory.mjs` | 把业务模块的 memory 段改成 `import rt.memory`（同一块线性内存只有一个定义者） |
 | `demo.sh` | 一键 6 步演示（依赖 → 编译 → 链接 → 运行 → 比对 → 负向） |
 | `src/app.ts` | 正向用例源码（fib / 字符串 / 模板字符串） |
-| `docs/perry-wasm-wamr.md` | 原理与实现细节 |
+| `docs/paper/perry-wasm-paper.md` | 论文：原理与实现细节（§3 系统构造、附录 F 实施过程） |
 
 ## 快速开始
 
@@ -59,7 +59,7 @@ execute _start: Exception: unreachable
 性能基准另有 D 路 perry 原生产物：`build/bench_perry_native` 16.3 MB（TS → LLVM →
 可执行文件，`tools/attribution/bench_d.sh` 一键复现）与 E 路 WAMR AOT 产物：
 `build/bench_merged.aot` 74 KB（wasm-merge 合并单模块 → wamrc，`tools/attribution/
-aot_e.sh` 一键复现，见 `docs/performance.md`）。
+aot_e.sh` 一键复现，见 `docs/paper/perry-wasm-paper.md` 附录 B）。
 
 ## 互操作约定
 
@@ -83,15 +83,16 @@ aot_e.sh` 一键复现，见 `docs/performance.md`）。
 
 ## 文档导航
 
-- `docs/perry-wasm-wamr.md` — 架构原理与实施细节。
-- `docs/performance.md` — 六路性能基准（wasm×WAMR 解释器/AOT / wasm×V8 / 手写原生 / perry 原生 / QuickJS）。
-- `docs/typed-abi-migration.md` — 路径 4：perry-codegen-wasm typed ABI 化 + 去影子栈实施规划。
+- `docs/paper/perry-wasm-paper.md` — 论文：架构原理与实施细节（§3 系统构造）、六路性能基准
+  （§4 性能评估方法学，wasm×WAMR 解释器/AOT / wasm×V8 / 手写原生 / perry 原生 / QuickJS，
+  完整数字与复现命令见附录 A/B）、路径 4 typed ABI 化 + 去影子栈实施规划（§7.3，详见附录 G）、
+  实施过程与 CI 迁移（附录 F）。
 
 ## CI 性能基准
 
 六路基准（A/B/C/D/E/F）可在 GitHub Actions 上复现：`.github/workflows/bench.yml`
 （ubuntu-22.04）。手动 `workflow_dispatch` 或 PR 打 `bench` 标签触发；结果
 `build/bench-results.json` + 汇总表 + 原始样本上传 artifact。回归判定用「各目标 ÷ C
-原生」的倍数与 `docs/performance.md` 本机基线对照（±50% warning 不 fail；CI runner 与
-本机 CPU 不同，绝对时间不可跨机比较），首次运行即建立 CI 基线。复现与口径见
-`docs/performance.md`「测量口径 · CI 环境」与 `docs/process.md`「增补：性能测试迁移到 CI」。
+原生」的倍数与 `docs/paper/perry-wasm-paper.md` §4.3 本机基线对照（±50% warning 不 fail；CI
+runner 与本机 CPU 不同，绝对时间不可跨机比较），首次运行即建立 CI 基线。复现与口径见
+`docs/paper/perry-wasm-paper.md` §4.2「测量纪律」与附录 F.9「CI 环境与回归判定」。

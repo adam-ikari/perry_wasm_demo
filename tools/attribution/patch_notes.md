@@ -12,7 +12,7 @@
 wasm 后端把类型擦除：所有值 NaN-box 成 i64，`+` → `mem_call(js_add)` 动态分派、
 if/while/for 条件 → `mem_call_i32(is_truthy)` 桥。bench（fib(29) + 10^6 循环）
 每层递归 2 次桥调用，桥函数体占 E 路 95.8% 耗时（122 ms，见
-`docs/performance.md`「修复路径与天花板」）。本 patch 在**发射点**做保守特化，
+`docs/paper/perry-wasm-paper.md` §6「两种修复与其验证」）。本 patch 在**发射点**做保守特化，
 把可静态证明的 number `+` 与二值布尔条件直接内联成原生 wasm 指令。
 
 ## 改动清单（file:line，行号为 patch 后）

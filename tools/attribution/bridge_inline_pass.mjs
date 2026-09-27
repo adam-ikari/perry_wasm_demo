@@ -34,7 +34,7 @@
  * tools/attribution/rt_fast/probe_nameid.md 与 runtime-wasm/src/lib.rs BRIDGES/intern 序）；
  * 它是 rt ABI 的一部分，与具体程序无关。pass 只对已知 (nameId,argc) 且类型可证的调用点动手，
  * 其余桥调用（console_log/string_concat/…）原样保留。若 perry 升级改变该序 → 本 pass 失配
- * （后处理相对上游改造的固有劣势，见 docs/performance.md 后处理节）。
+ * （后处理相对上游改造的固有劣势，见 docs/paper/perry-wasm-paper.md §6.2 与 §7.2）。
  *
  * 用法:
  *   node tools/attribution/bridge_inline_pass.mjs <in.wat> <out.wat> [--report out.json]
@@ -536,7 +536,7 @@ function handleCall(node, env, ctx, boolTags, memCall, memCallI32, retKinds, mod
     return;
   }
   // 普通调用：perry 影子栈纪律——实参在 live sp 之下（偏移 < 0），被调方帧在 live sp 之上（偏移 ≥ 0）。
-  // 故普通调用只可能踩掉 ≥0 的槽位，保留 <0（实参区）。见 docs/performance.md 后处理节。
+  // 故普通调用只可能踩掉 ≥0 的槽位，保留 <0（实参区）。见 docs/paper/perry-wasm-paper.md §6.2。
   env.dropFrame();
   if (ctx) {
     const argKinds = args.map((a) => kindOf(a, env, boolTags, memCall, memCallI32, retKinds));
