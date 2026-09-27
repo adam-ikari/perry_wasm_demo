@@ -5,7 +5,7 @@ category: concept
 status: active
 tags: [perry, wasm, wamr, abi]
 created: "2026-09-15T05:11:48"
-updated: "2026-09-21T03:23:54"
+updated: "2026-09-27T05:10:45"
 ---
 
 <!-- compiled_truth -->
@@ -20,6 +20,27 @@ perry 的 wasm 后端产出的模块声明 211 个 `rt.*` 导入，把"运行时
 - `host/perry_link.c` runner 只做 load rt → register "rt" → `wasm_runtime_set_wasi_args(rt)` → load app → instantiate → `wasm_application_execute_main`，没有任何 `rt.*` 实现。
 - 实测：`./demo.sh` 6/6 步 PASS；正向（Rust 运行时模块 vs perry JS 宿主层）5 行逐字节一致；负向（数组程序）`array_new` 实名报错、退出码 1。产物：`app.wasm` 10650 B、`app_link.wasm` 10658 B、`rt.wasm` 16798 B。
 
+## 路线四（已验证）：直接复用 perry-runtime 源码编译进 wasm
+
+不再手写 `rt.*` 桩，而是把 `crates/perry-runtime` 作为 path 依赖，编成 `wasm32-wasip1` cdylib，用薄适配层把 `rt.*` 转发到 `js_*`。**已实测成立**（探针 `/tmp/reuse-probe`，WAMR iwasm 2.4.3）：
+
+- **链接可行**：`use perry_runtime::builtins::js_add; use perry_runtime::value::{js_is_truthy, JSValue};` 走 Rust 路径引用即可把 rlib 成员拉入；**仅用 `extern "C"` 块声明符号会被留在 wasm 导入段**（rlib 成员不拉入），这是第一个坑。
+- **自包含**：模块 imports 从 39 降到 28，**28 个全部是 `wasi_snapshot_preview1.*`，零非 WASI 导入**。做法是适配层自实现 `setjmp`/`longjmp`/`perry_sjlj_try` + 8 个 `_Unwind_*`。
+- **功能实证**：`iwasm -f rt_is_truthy <w> 0` → `0x0`；`… 1.0` → `0x1`；`iwasm -f rt_js_add <w> 2.0 3.0` → `0x4014000000000000`（=5.0）。perry 自家 Rust 运行时语义在 wasm 里真实执行。
+- **EH 桩是链接期残留、非运行期需求**：perry `build.rs` 明写 *wasm32 has no C setjmp trampoline: the wasm backend routes try/catch through host imports, so the Rust-side transport never arms one*；wasm 下 try/catch 走 `rt.try_start`/`rt.try_end` 宿主导入，`_Unwind_*` 永不被调用。
+- **ABI 天然对齐**：perry-runtime 与 `rt.*` 的 NaN-box tag 完全一致（`0x7FFC` singleton / `0x7FFD` pointer / `0x7FFE` int32）。**唯一差异**是 `0x7FFF` 字符串低 48 位：`rt.*` 是字符串表下标，perry-runtime 是内存指针 → 适配层需建 index↔pointer 双向表。
+- **覆盖度**：198 个 `rt.*` 中，150 个与 `js_*` 同名/近名直连，另 16 个有不同名但存在的对应实现（如 `array_new`→`js_array_alloc`、`object_new`→`js_object_alloc`、`map_new`→`js_map_alloc`、`js_typeof`→`js_value_typeof`、`closure_new`→`js_closure_alloc`），合计 **166 / 198 ≈ 84%**。
+- **无对应者 31 个**，且都是"本就不该在运行时里"的：Math 内建 4（native codegen 内联为 wasm 指令，运行时不提供）、Web API 13（fetch/Response/URLSearchParams，本就在宿主边界外）、Crypto 4（依赖 native 库）、try/catch 2（按设计走宿主导入）、零散 8。
+- **适配层端到端（2026-09-26，`/tmp/rt4`）**：13 个真实桥的值语义全部换成 perry-runtime 导出后，demo 正向 5 行与参照逐字节一致、负向 `array_new` 实名报错退出码 1、导入段 28 项全 WASI。
+- **代价**：体积 16,928 B → 7,298,105 B（约 430×；探针形态 6.73 MB，均未 strip/未裁剪）；同一 `bench.wasm` 15 样本 P50 路线三 103.638 ms vs 路线四 112.489 ms = **1.09×**（成因归于 StringHeader 指针层与 `RuntimeHandleScope`/thread-local rooting，未逐项插桩）；另有一次性 INIT 段 252 ms（路线三无）。多模块共享下体积可摊薄。
+- **边界**：性能矩阵全部仍只来自路线三；路线四只过了 13 个桥的值语义 + 单基准计时，AOT 形态、31 个缺口、非 fib 负载下的 1.09× 均未测。
+
+结论：把 perry 的 JS 运行时"完整"放进 wasm 在链接与执行层面已无阻塞；剩余工作是把 166 个直连 + 31 个缺口逐个接完，缺口多数需要宿主侧实现或按 wasm 语义改写，而非运行时复用问题。
+
+## 测量修正：NAME_CACHE 缓存降幅（2026-09-26 复测）
+
+9-19 记录的 nameId 缓存直查降幅 −43%（3959→2292 ms，322 ns/次）在 9-26 的同机交错复测中不可复现：同一 `bench.wasm` + 同一 runner，正式 `rt.wasm`（缓存直查）与按名扫描复刻版（`/tmp/rt_nocache`，16818 B）交错各 15 样本 P50 为 **110.893 vs 113.929 ms，交错降幅仅 2.7%**。两版正/负向行为一致。跨日绝对值差约 37×（当日 P50 107–113 ms vs 9-19 的 3959 ms），而代码只差 130 B 缓存表——归因当日环境（背景负载/宿主状态），非代码。**可外推结论只剩：缓存直查不慢于按名扫描，且两版行为等价**；−43%/−38%/322 ns 只作 9-19 当日环境读数。论文 §6.1 与附录 A.11 已写入该修正与四组 15 样本原始值。
+
 ## 历史：C 桥接宿主（路线一·探针）
 
 用 `host/perry_rt.c` 实现 13 个纯原始值 `rt.*`，`build/rt_symbols.inc` 补齐 198 个桩，编成 `libperry_rt.so`，`iwasm --native-lib=…` dlopen 进 WAMR；宿主侧 `fwrite(stdout)` 输出、`wasm_runtime_set_exception` 抛异常。价值是测出宿主边界与 `rt.*` ABI，已被路线三取代。
@@ -28,37 +49,9 @@ perry 的 wasm 后端产出的模块声明 211 个 `rt.*` 导入，把"运行时
 
 `.so` 导出 `get_native_lib()` 返回模块名 `"rt"` 与 `NativeSymbol[]`；`iwasm --native-lib=…`。原生函数首参为公开类型 `wasm_exec_env_t`；iwasm 需用 `-Wl,--export-dynamic` 构建，否则宿主库解析不到 `wasm_runtime_*`。未实现的导入一律抛 `Exception: bridge function '<name>' is not implemented`（退出码 1），不返回假数据。产物 `app.wasm` 只有 11 个段、无 name 自定义段，函数名与局部变量名不泄漏。
 
-## 组装路线（按改动量排，路线三已实现）
 
-1. **多模块共享内存（= 路线三，已实现）**：runtime 编成独立 wasm 模块，导出同名 `rt.*`，memory 从业务模块导入（`--import-memory`）；业务 wasm 零改动，宿主只把两模块接起来（WAMR 多模块 / wasmtime linker）。宿主侧只剩 WASI。
-2. **静态链接成单模块（未实施）**：`wasm-ld` 把 runtime 的 wasm 静态库与 codegen 输出链成一个模块，与 native 路径同构；需要 codegen 产出可重定位对象，或让链接器把 import 解析为本地符号。
-3. **Component Model（未实施）**：WIT 声明 `rt` 接口；接口最干净，但 canonical ABI 的 lift/lower 给每次调用加编解码，与"f64 位模式 + 线性内存槽位"的零拷贝约定冲突，WAMR 支持也弱。
 
-## 阻碍（来自 perry 源码）
-
-- `perry-runtime` 含 `fs` / `dns` / `dgram` / `child_process` / `cluster` / `net` / `atomics`+`futex` / `macos_bundle` 等 OS 强耦合模块，wasm 目标要么走 WASI（socket 仍在提案），要么不编入。这部分永远在宿主边界外。
-- 分配器：默认 mimalloc 受 `#[cfg(target_pointer_width = "64")]` 限制，wasm32（ILP32）自动落回系统分配器。
-- 体积：运行时进 wasm 后每份产物自带一份；多模块/component 可共享。
-- 有利条件：perry 已有按程序实际特性裁剪运行时子集的机制（auto-optimize / `optimized_libs.rs`），wasm 化相当于给它加一个 wasm 目标预设。
-
-## 本次实测固化的 ABI（业务模块与运行时模块共用，仍然有效）
-
-值 = f64 位模式按 i64 过边界；`0x7FFC…0001..04` = undefined/null/false/true，高 16 位 `0x7FFF` = 字符串(低 32 位为字符串表下标)，`0x7FFD` = 对象/数组/闭包 handle，`0x7FFE` = int32 快路径。
-211 个导入只用到 16 种类型，绝大多数是 `(i64…)->i64` 形态；`string_len` = `(i64)->i64`，`string_concat` = `(i64,i64)->i64`，`console_log` = `(i64)->()`，`string_new` = `(i32,i32)->()`。
-`mem_call(nameId, argc, base)`：nameId 是桥接函数名在字符串表里的下标，参数以 u64 槽位写在线性内存 `base`，结果写回 `base`；`mem_call_i32` 结果直接 i32 返回。字符串表按启动时的 `rt.string_new` 调用顺序 append，下标即 id——错位则字符串全废。
-
-## WAMR AOT 事实（2026-09-19 实测）
-
-- **AOT 文件格式不支持 import memory**：`core/iwasm/compilation/aot_emit_aot_file.c` 硬编码 `import_memory_count = 0`（TODO 注释），加载时 `aot_validator.c` 直接拒绝（"import memory is not supported"）。因此双模块结构（业务模块 import rt.memory）**无法整体 AOT**：app.aot + rt.aot 运行即 "out of bounds memory access"。
-- **可行方案**：用 binaryen 的 `wasm-merge` 把 app+rt 合并成单模块再 `wamrc`。系统 LLVM 14 即可构建 wamrc，无需自编全量 LLVM。合并后需后处理（`tools/attribution/patch_merged.mjs`）：删 rt 侧 `__data_end`/`__heap_base` 导出（与 app 栈指针组合成非法 aux stack）+ 织入 `_start` wrapper 先调 `_initialize`。
-- **性能结论**：干净 wasm × WAMR AOT 与原生 gcc -O2 同速（E' 1.362 ms = 0.97× 原生，解释器 35× 引擎因子归零）；perry wasm × AOT E 146.829 ms = 原生的 104×，剩余差距几乎全是 perry codegen 桥调用形态。
-- **perry 两条后端差距**（perry wasm vs perry 原生）：解释器下 393× → AOT 下 23×。
-## 性能根因与修复路径（2026-09-21）
-
-- **根因裁定（100%）**：perry wasm 慢的根因在 `perry-codegen-wasm` 的类型擦除桥形态，与引擎/优化器无关——干净 wasm × WAMR AOT 与原生 gcc -O2 同速（E' 1.362 ms = 0.97× 原生）；perry wasm × AOT E 146.829 ms = 原生 104×；nohost 隔离实验证明调用图形态本身只值 5.9 ms，E 的 141.4 ms 里 135.5 ms（95.8%）是 rt 侧 `mem_call` / `js_add` 桥函数体的机器码执行（每桥 25.4 ns + 装箱税 1.4 ns）。
-- **QuickJS 旁证**：纯解释器跑同算法仅 85.5 ms，比 perry wasm × AOT（146.8 ms）还快 0.58×——无桥的解释器胜过有桥的机器码。
-- **修复天花板（等价手工特化实测）**：路径 3（发射点类型特化）→ B2 = 17.2 ms（快 7.1×）；路径 4（typed ABI 化 + 去影子栈）→ V3 = 3.3 ms，即与 perry 原生纯执行（1.6–2.6 ms）同数量级。用户裁决路径 4 为正确路线。
-- **方案文档**：`docs/typed-abi-migration.md`（6 阶段 16–30 人日，含上游 file:line 索引）；perry 原生路本身健康，纯执行仅比手写 C 慢 1.2–1.9×。
+论文 `docs/paper/perry-wasm-paper.md` 已完成四条实验 + 复测修正的整合，提交 `81d828b`（2026-09-27）。
 
 
 ## Timeline
@@ -115,4 +108,58 @@ perry 的 wasm 后端产出的模块声明 211 个 `rt.*` 导入，把"运行时
   kind: decision
   summary: "compiled_truth 追加「性能根因与修复路径（2026-09-21）」节: 根因=codegen-wasm 类型擦除桥形态(非引擎/优化器), QuickJS 纯解释器 85.5ms 反超 AOT 桥形态 0.58×, 修复天花板 路径3→17.2ms / 路径4→3.3ms, 方案 docs/typed-abi-migration.md"
   source: "docs/performance.md 审计节 + docs/typed-abi-migration.md + tools/attribution/nohost_box_app.wat 隔离实验"
+  affects: [perry-wasm-runtime-bridge]
+
+- time: 2026-09-23T12:34:13
+  kind: decision
+  summary: "来源文档整合后更新方案文档指针: typed ABI 迁移规划并入论文"
+  source: "docs 整合: 5 个来源 md 并入 docs/paper/perry-wasm-paper.md"
+  affects: [perry-wasm-runtime-bridge]
+
+- time: 2026-09-24T02:25:58
+  kind: evidence
+  summary: "复用 perry-runtime 编译进 wasm 已实测可行: 新建 cdylib 直接 use perry_runtime::builtins::js_add / value::js_is_truthy 等公开 re-export, cargo build --target wasm32-wasip1 链接成功 (6.85MB, 39 imports 全是 env._Unwind*/setjmp/longjmp + wasi_snapshot_preview1, 无任何 js_* 导入), js_add/js_is_truthy 成为模块内真实导出。关键: 必须走 Rust 路径引用符号, 仅 extern 块声明会被留在 wasm 导入段 (rlib 成员不拉入)。perry-runtime 的 NaN-box tag 与 rt.* ABI 完全一致 (0x7FFC singleton / 0x7FFD pointer / 0x7FFE int32), 唯一差异是 0x7FFF 字符串低 48 位: rt.* 是字符串表下标, perry-runtime 是内存指针, 适配层需建 index<->pointer 双向表。"
+  source: "probe: /tmp/reuse-probe (perry-runtime path dep, wasm32-wasip1 cdylib)"
+  affects: [perry-wasm-runtime-bridge]
+
+- time: 2026-09-24T02:45:52
+  kind: evidence
+  summary: "复用可行性决定性验证通过: (1) 自包含性——适配层自实现 setjmp/longjmp/perry_sjlj_try/_Unwind_* 八个符号后, 模块 imports 从 39 降到 28, 且 28 个全部是 wasi_snapshot_preview1.*, 零非 WASI 导入; (2) 功能实证——iwasm 直接调用 rt_is_truthy(0)->0x0, rt_is_truthy(1.0)->0x1, rt_js_add(2.0,3.0)->0x4014000000000000(=5.0), 即 perry 自家 Rust 运行时语义在 wasm 里真实执行; (3) EH 桩是链接期残留而非运行期需求——perry build.rs 明确注释 'wasm32 has no C setjmp trampoline: the wasm backend routes try/catch through host imports, so the Rust-side transport never arms one', 即 wasm 下 try/catch 走 rt.try_start/rt.try_end 宿主导入, _Unwind_* 永不被调用。rt.* 覆盖度: 198 个中 150 个与 js_* 同名/近名直连, 另 16 个有不同名但存在的对应实现, 合计 166 (~84%); 剩余 31 个无对应: Math 内建 4(在 native codegen 里内联为 wasm 指令, 运行时不提供)、Web API 13(fetch/Response/URLSearchParams, 本就在宿主边界外)、Crypto 4(依赖 native 库)、try/catch 2(按设计走宿主导入)、零散 8。规模代价: 单模块 6.73MB(未 strip/未裁剪特性), 对多模块共享可摊薄。"
+  source: "probe /tmp/reuse-probe: wasm32-wasip1 cdylib + WAMR iwasm 2.4.3 实测"
+  affects: [perry-wasm-runtime-bridge]
+
+- time: 2026-09-24T02:49:30
+  kind: decision
+  summary: "追加路线四(已验证): 直接复用 perry-runtime 源码编进 wasm32-wasip1 cdylib, imports 100% WASI, iwasm 实测 js_add/is_truthy 语义正确, rt.* 覆盖 166/198, 31 缺口均为本不该在运行时内的 Math/Web/Crypto/EH"
+  source: "探针 /tmp/reuse-probe + WAMR 2.4.3 实测"
+  affects: [perry-wasm-runtime-bridge]
+
+- time: 2026-09-26T02:39:19
+  kind: evidence
+  summary: "适配层实验通过: /tmp/rt4 把 13 个真实桥的值语义全部换走 perry-runtime C 导出 (字符串表条目改存 StringHeader*, codegen index 载荷不变)。WAMR 实测 app.ts 正向逐字节一致、负向 array_new 实名报错、imports 28 全 WASI。代价 16.9KB->7.3MB(~430x)。坑: rust-lld fat-LTO 读 perry_runtime rlib bitcode 失败(magic/版本正常), 改 lto=thin 绕过; 并发 cargo 同 target 会写坏 fingerprint。"
+  source: "/tmp/rt4 适配层 + WAMR iwasm 2.4.3 实测"
+  affects: [perry-wasm-runtime-bridge]
+
+- time: 2026-09-26T08:03:47
+  kind: evidence
+  summary: "route-4 性能实测: 同一 bench.wasm(fib29+1e6循环, 15样本P50), route-3 手写运行时 103.6ms vs route-4 perry-runtime 适配层 112.5ms = 1.09x 慢。桥路径为主 hot path (~533万次 mem_call), perry StringHeader 指针层与 perry 动态 add 的 RuntimeHandleScope/thread-local rooting 开销 (~322ns/桥量级的一部分) 抬高桥耗时; INIT 段 perry-runtime 一次性初始化 252ms (route-3 无)。结论: 计算密集场景 route-4 慢 ~9%, 语义正确性等价 (fib/sum 输出一致), 代价主要是体积 430x 与桥路径常数。"
+  source: "build/bench_time 15样本 P50 实测 2026-09-26"
+  affects: [perry-wasm-runtime-bridge]
+
+- time: 2026-09-26T10:50:56
+  kind: evidence
+  summary: "NAME_CACHE 复测修正(2026-09-26): NAME_CACHE 缓存早已合入正式 runtime-wasm/src/lib.rs (9/19 采纳), 今日 demo.sh 重编 6/6 PASS。同机交错 A/B 重测 (同一 bench.wasm+runner, 各15样本P50): 缓存直查 110.9ms vs 按名扫描 113.9ms = 提速 2.7%, 远低于 9/19 实验记录的 -43%(3959→2292ms)。9/19 值在当前环境不可复现, 推断为当时环境因素 (现 P50 107-113ms vs 当时 3959ms, 差 37x, 非代码可解释)。以今日交错测量为准: memcmp 10 项短串在本机 ~0.1us/次量级, 并非主要瓶颈; 论文 §6.1 的 -43%/322ns 数字应标注当日环境, 不可外推。两版本正向/负向行为均一致。"
+  source: "build/bench_time 交错 A/B, /tmp/rt_nocache 复现版"
+  affects: [perry-wasm-runtime-bridge]
+
+- time: 2026-09-26T18:16:02
+  kind: note
+  summary: "论文 docs/paper/perry-wasm-paper.md 已整合 2026-09-24/26 四条新实验：§3.2 三条路线改四条路线并写入路线四（rlib 路径引用、导入段 39→28 全 WASI、覆盖 166/198、体积 430×、单基准 1.09×、INIT 252 ms）；§6.1 新增 nameId 缓存复测修正（交错降幅 2.7%，−43% 降级为 2026-09-19 当日环境读数，不可外推）；同步摘要/§1.3/§2.3/§4.3/§5.3/§8/§9；新增附录 A.11（四组 15 样本原始值全量转录，已与 /tmp 原始记录逐个核对一致）与 F.13（路线四实施细节与坑，探针未入库声明）。行宽 ≤80 检查通过。未提交 git。"
+  source: "2026-09-26 论文修订"
+  affects: [perry-wasm-runtime-bridge]
+
+- time: 2026-09-27T05:10:45
+  kind: decision
+  summary: "compiled_truth 增补: 路线四适配层端到端(13桥值语义全换, 正负向一致, 导入28全WASI)与代价(16,928→7,298,105 B≈430×, 单基准 103.638 vs 112.489=1.09×, INIT 252ms)及性能边界(矩阵仍只来自路线三); 新增「测量修正」节: nameId 缓存交错降幅 2.7%(110.893 vs 113.929, n=15), −43% 降级为 2026-09-19 当日环境读数不可外推; 论文整合已提交 81d828b"
+  source: "2026-09-24/26 四条实验 + 论文整合提交 81d828b"
   affects: [perry-wasm-runtime-bridge]
