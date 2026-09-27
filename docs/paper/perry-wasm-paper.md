@@ -33,7 +33,8 @@ bench 快 7.3×），再直接修改上游 `perry-codegen-wasm` 的发射点，
 定稿后追加了两组实验（2026-09-24/26）。
 其一把运行时一侧再推一步：不再手写子集，而是把上游 `perry-runtime` 源码直接编进 wasm（路线四），
 薄适配层把 13 个桥的值语义换成上游实现——正负向输出与路线三逐字节一致、导入段 28 项全为 WASI、
-`rt.*` 覆盖 166/198（84%），代价是体积 16.9 KB → 7.3 MB（约 430×）与桥路径 1.09× 的常数。
+`rt.*` 桩的上游对应实现 179/198（90%，名层口径），代价是体积 16.9 KB → 7.3 MB（约 430×）
+与桥路径 1.09× 的常数。
 其二复测了 nameId 缓存：同机交错 A/B 的降幅是 2.7%，而 9-19 记录的 −43% 属当日环境读数，不可外推（见 6.1）。
 
 **关键词：** WebAssembly；TypeScript 编译器；运行时模块化；性能定位；类型特化；WAMR
@@ -86,9 +87,9 @@ The first pushes the runtime side one step further: instead of a hand-written
 subset, the upstream `perry-runtime` sources are compiled straight into wasm
 (route 4), with a thin adapter replacing the 13 bridge value semantics by the
 upstream implementations — positive and negative outputs stay byte-identical
-to route 3, the import section is 28 entries of pure WASI, and `rt.*` coverage
-is 166/198 (84%), at the cost of size (16.9 KB → 7.3 MB, about 430×) and a
-1.09× constant on the bridge path.
+to route 3, the import section is 28 entries of pure WASI, and 179/198 `rt.*`
+stubs have upstream counterparts (90%, name-layer), at the cost of size
+(16.9 KB → 7.3 MB, about 430×) and a 1.09× constant on the bridge path.
 The second re-measures the nameId cache: an interleaved same-machine A/B run
 gives 2.7%, so the −43% recorded on 9-19 is a same-day environmental reading
 that does not extrapolate (see §6.1).
@@ -140,7 +141,8 @@ RQ1 要简单些，但答案有所保留，见 3.1 与 8.4。
 1. **一条已完成运行验证的架构路线**：把 perry 的 Rust 运行时按 wasm 目标编译成独立模块，由 WAMR 多模块机制与业务模块链接，
     宿主只剩 WASI 的一个调用（3.2–3.4）。`rt.*` 的调用约定、业务代码、codegen 均未改动。
     2026-09-24/26 的追加验证在此之上给出路线四：把上游 `perry-runtime` 源码直接编进 wasm，
-    导入段 100% 为 WASI、`rt.*` 覆盖 166/198，正负向输出与路线三一致（3.2）。
+    导入段 100% 为 WASI、上游对应实现覆盖 179/198 个 `rt.*` 桩（90%，名层口径）、
+    正负向输出与路线三一致（3.2）。
 2. **一套 `rt.*` ABI 的逆向方法**：在没有规范、但有可运行参考实现时，把参考实现当 oracle 插桩，而不是读源码猜（3.3）。
 3. **一套可复用的性能改进方法**：把总倍数拆成乘积因子、用手写的干净对照 wasm 隔离引擎、做闭合校验、再用独立引擎交叉验证（第 5 章）。
     它不停在"wasm 比原生慢 N 倍"这一步，而要拆出这 N 倍里哪一部分属于引擎、哪一部分属于 codegen。
@@ -251,7 +253,7 @@ RQ1 的答案有一部分是肯定的。
 | 一·C 桥接 | 宿主里用 C 手写 `rt.*`，编成 `libperry_rt.so`，`iwasm --native-lib` 动态载入 | 已实施为探针，后废弃为历史背景 | 成本随程序用到的语言特性线性增长 |
 | 二·AOT 内联 | `wasm-ld` 把运行时 wasm 静态库与 codegen 输出链成单模块（同构于 native 路径）；或走 Component Model | 未实施 | 需 codegen 产出可重定位对象，或链接器把 import 解析成本地符号；Component Model 则与零拷贝约定冲突 |
 | 三·运行时 wasm 模块 | 运行时编成独立 wasm 模块，导出同名 `rt.*` 与 memory，业务模块 import 它，WAMR 多模块链接 | **当前实现，已实测** | 运行时的 OS 强耦合模块需裁剪（见 3.5） |
-| 四·运行时源码复用 | 上游 `crates/perry-runtime` 作 path 依赖编成 `wasm32-wasip1` cdylib，薄适配层把 `rt.*` 转发到 `js_*` | **2026-09-24 探针 + 2026-09-26 适配层，已实测** | 体积 16.9 KB → 7.3 MB（约 430×）；桥路径常数 1.09×；31 个 `rt.*` 无对应实现 |
+| 四·运行时源码复用 | 上游 `crates/perry-runtime` 作 path 依赖编成 `wasm32-wasip1` cdylib，薄适配层把 `rt.*` 转发到 `js_*` | **2026-09-24 探针 + 2026-09-26 适配层，已实测** | 体积 16.9 KB → 7.3 MB（约 430×）；桥路径常数 1.09×；19 个 `rt.*` 名层无对应实现（5 个已就地改写） |
 
 路线一是探针，不是终点。它测定了 ABI，也证明了"每个平台重写一遍运行时"这条路不可行：13 个手写实现只够支撑纯原始值的程序，程序一用数组立刻报错。
 
@@ -294,22 +296,34 @@ number 与 bool 的 NaN-box 值（以 f64 的 NaN 载荷区装载值、带标签
   导入段从 39 降到 28，且 28 项**全部是 `wasi_snapshot_preview1.*`，零非 WASI 导入**
   （`wasm-objdump -x` 实测）。EH 桩是链接期残留而非运行期需求：perry `build.rs` 写明 wasm32
   没有 C setjmp trampoline，wasm 下 try/catch 走 `rt.try_start`/`rt.try_end` 宿主导入。
-- **语义**：`iwasm -f rt_is_truthy 0` → `0x0`、`… 1.0` → `0x1`、
-  `iwasm -f rt_js_add 2.0 3.0` → `0x4014000000000000`（=5.0），
+- **语义**：`iwasm`（WAMR 2.4.3，`.deps/wamr-build/iwasm`）三条 `-f` 探针实测
+  （2026-09-27 由 `verify.mjs` 第 5 步复跑同一组）：`iwasm -f is_truthy build/rt4.wasm 0`
+  → `0x0:i32`，入参 `0x3FF0000000000000`（f64 1.0 的位型）→ `0x1:i32`；
+  `iwasm -f js_add build/rt4.wasm 0x4000000000000000 0x4008000000000000`
+  （2.0 与 3.0 的位型）→ `0x4014000000000000:i64`（=5.0）。
+  模块导出名是 `rt.*` 的字段名（`is_truthy`/`js_add`，无 `rt_` 前缀），
   即 perry 自家 Rust 运行时的语义在 wasm 里真实执行。
   ABI 天然对齐：NaN-box 标签（`0x7FFC` 单例 / `0x7FFD` 指针 /
   `0x7FFE` int32）
   两边一致，唯一差异是 `0x7FFF` 的字符串载荷——`rt.*` 是字符串表下标、perry-runtime 是内存指针，
   适配层因此建 index↔pointer 双向表（字符串表条目改存 `StringHeader*`，codegen 侧的下标载荷不变）。
-- **覆盖度**：198 个桩里 150 个与 `js_*` 同名/近名直连，16 个有异名但存在的对应实现
-  （如 `array_new`→`js_array_alloc`、`object_new`→`js_object_alloc`、
-  `js_typeof`→`js_value_typeof`），合计 **166/198 ≈ 84%**；
-  余下 31 个无对应者分属本就不该在运行时内的几类：Math 内建 4
-  （native codegen 内联为 wasm 指令）、Web API 13（fetch/Response/URLSearchParams）、
-  Crypto 4、try/catch 2（按设计走宿主导入）、零散 8。
+- **覆盖度**：198 个桩与上游 `js_*` 符号全集按名层三层比对，
+  `tools/route4/coverage.mjs` 一条命令可复算（2026-09-27）：
+  122 个同名直连、27 个近名直连（去下划线归一或同词干，如
+  `closure_call_0`→`js_closure_call0`、`array_find_index`→`js_array_findIndex`）、
+  30 个有异名但存在的对应实现（如 `array_new`→`js_array_alloc`、
+  `js_typeof`→`js_value_typeof`、`searchparams_get`→`js_url_search_params_get`），
+  合计 **179/198 ≈ 90%**。余下 19 个名层无对应者分属本就不该在运行时内的几类：
+  Math 内建 4（native codegen 内联，适配层已就地改写）、Web API 7
+  （`response_*` 6 个无专用取值符号、`fetch_url` 真身在 perry-stdlib/宿主网络）、
+  Crypto 4、try/catch 2（按设计走宿主导入）、零散 2（`string_includes`、
+  `is_null_or_undefined`）——其中 5 个已由适配层就地改写，14 个仍待实现。
 
-适配层的端到端实测（2026-09-26）：把 13 个真实桥的值语义全部换成 perry-runtime 导出后，
+适配层的端到端实测（2026-09-26）：适配层共实现 29 个 `rt.*`——13 个桥全部转成 perry-runtime
+导出，另对 16 个原桩补了实现（11 个转发上游符号、5 个就地改写），其余 182 个仍是报错桩。
 demo 正向 5 行与参照逐字节一致、负向 `array_new` 实名报错且退出码 1、导入段 28 项全 WASI；
+demo 在路线三下就已通过，而那时 198 个桩全是 trap，故其执行路径只触及这 13 个桥——
+上面的覆盖度是名层潜力，不是运行期已接通数。
 代价是模块体积从 16,928 B 涨到 7,298,105 B（约 430×）。同一 `bench.wasm`（fib(29) + 10⁶ 循环）
 同机各 15 样本 P50：路线三 103.638 ms、路线四 112.489 ms = **1.09×**（原始样本见附录 A.11）。
 差距集中在桥路径——约 533 万次 `mem_call` 本就是 hot path，其上叠了 perry StringHeader 的指针层与
@@ -319,9 +333,11 @@ rlib bitcode 失败（magic 与版本均正常），改 `lto = "thin"` 绕过；
 并发 cargo 共用同一 target 会写坏 fingerprint。
 
 结论：路线四把 RQ2 里"补齐完整 JS 语义等于重写一遍 `perry-runtime`"的前提改写成"把上游运行时编进
-wasm"，链接与执行层面已无阻塞，剩余工作是那 31 个缺口逐个接完，多数需要宿主侧实现或按 wasm 语义改写。
+wasm"，链接与执行层面已无阻塞。剩余 182 个桩分两段：168 个上游有对应实现、接线是搬运
+（多数只差参数整形），14 个名层无对应才需要宿主侧实现或按 wasm 语义改写
+（该类共 19 个，适配层已就地改写 5 个）。
 需要划清的边界是：路线三承载了本文全部性能矩阵，路线四只做了正确性验证与单基准计时，
-其 AOT 形态、31 个缺口、以及 1.09× 的成因拆分都未测（见 8.6）。
+其 AOT 形态、14 个无对应缺口的接法、以及 1.09× 的成因拆分都未测（见 8.6）。
 
 ### 3.3 `rt.*` ABI 的逆向：把参考实现当 oracle
 
@@ -1383,9 +1399,11 @@ A 的冷启动 real 含 `bench_time` 固定的一次预热，与 B/C 的"一次�
 路线三把"扩展方式"从"写宿主"变成"在 `runtime-wasm/src/lib.rs` 里加实现、重跑 `gen-rt-symbols.mjs`"，
 但没有改变补齐完整 JS 语义所需的量级。
 路线四改变了这个前提（2026-09-24/26 实测）：不必重写，把上游 `perry-runtime` 直接编进 wasm 即可，
-`rt.*` 覆盖 166/198、导入段 100% 为 WASI、正负向输出与路线三一致，对象/数组/闭包缺口依旧存在。
+`rt.*` 桩的上游对应实现 179/198（名层口径）、导入段 100% 为 WASI、正负向输出与路线三一致，
+对象/数组/闭包缺口依旧存在。
 代价换了位置：体积 16,928 B → 7,298,105 B（约 430×，多模块共享下可摊薄）、桥路径 1.09×、
-一次性 INIT 段 252 ms；余下 31 个缺口仍要宿主侧实现或按 wasm 语义改写。
+一次性 INIT 段 252 ms；余下 19 个名层无对应者中 5 个已就地改写、
+14 个仍要宿主侧实现或按 wasm 语义改写。
 这条路线只过了单基准计时与 13 个桥的值语义，AOT 形态与完整程序覆盖未验（见 8.6）。
 适合这套方案的是**宿主可控、语言子集可裁剪**的场景（嵌入式规则脚本、计算密集的插件、既不想源码外流又不想放弃 TS 写法的内部交付）；
 把用满 npm 生态的应用迁移至此，首先要解决的问题不是源码保护，而是运行时要补多少。
@@ -1406,7 +1424,7 @@ typed ABI 规划文档也说明其全部 file:line 已对 `/tmp/perry-src` HEAD 
 以下结论在材料中已标注推断，本文保留同等不确定性，汇总见附录 E。阅读本文数字时应注意的划分：
 
 - **实测**：六路 P50 表、乘积因子与闭合校验、基线审计三条证据、隔离实验 `nohost` 系列、patch 前后 P50 与反汇编计数、
-  pass 的 28 次逐字节一致与覆盖率；路线四的导入段（28 项全 WASI）、`rt.*` 覆盖 166/198、
+  pass 的 28 次逐字节一致与覆盖率；路线四的导入段（28 项全 WASI）、`rt.*` 上游对应实现 179/198、
   正负向逐字节一致，以及 103.638 / 112.489 / 110.893 / 113.929 四组 15 样本 P50（附录 A.11）。
 - **推断**：rt 侧的分派与 NaN-box 编解码占掉每层 1.2 µs 的大头（未逐项插桩）；
   B 路 364× 内 codegen 形态与 JS 宿主层的相对占比未拆分；E 路 49×→108× 的分母定义说明；
@@ -1418,7 +1436,8 @@ typed ABI 规划文档也说明其全部 file:line 已对 `/tmp/perry-src` HEAD 
 - **条件性 / 未复现**：坑 4 的 `initializing thread failed!`；`--enable-llvm-pgo` 未验证；
   nameId 缓存 −43%（2026-09-19 批）在 2026-09-26 的同机交错复测中不可复现（交错降幅 2.7%，见 6.1）。
 - **未测**：WAMR LLVM JIT（需 `build_llvm.sh` 自编全量 LLVM，收益与 AOT 同源，暂无必要）；E 路冷启动；
-  字符串密集负载在 A/E 两路中的占比；路线四的 AOT 形态、31 个 `rt.*` 缺口、以及非 fib 负载下的桥路径开销。
+  字符串密集负载在 A/E 两路中的占比；路线四的 AOT 形态、14 个无对应 `rt.*` 缺口的接法、
+  以及非 fib 负载下的桥路径开销。
 
 ---
 
@@ -1435,8 +1454,9 @@ typed ABI 规划文档也说明其全部 file:line 已对 `/tmp/perry-src` HEAD 
 把 perry 的 Rust 运行时按 wasm 目标编译成独立模块、由多模块机制链接，宿主就只剩 WASI 的一个调用（`fd_write`），
 一次分发这一半成立。代价是运行时的 OS 强耦合模块需要裁剪，且完整 JS 语义（对象、闭包、GC）补齐的量级不变。
 路线四（2026-09-24/26 追加验证）把"重写一遍运行时"这个前提也松开了：把上游 `perry-runtime` 源码编进 wasm，
-导入段 100% 是 WASI、`rt.*` 覆盖 166/198、正负向输出与路线三逐字节一致；
-代价换成体积约 430× 与桥路径 1.09×，31 个缺口与对象/闭包/GC 仍然待补，且它只过单基准与 13 个桥的值语义。
+导入段 100% 是 WASI、`rt.*` 上游对应实现 179/198、正负向输出与路线三逐字节一致；
+代价换成体积约 430× 与桥路径 1.09×，余下 182 个桩（168 待搬运接线 + 14 无对应）
+与对象/闭包/GC 仍然待补，且它只过单基准与 13 个桥的值语义。
 
 性能方面：这部分工作是被途中发现的异常推着做的，不是一开始的目标；比数字更值得留下的一条规则是：总倍数必须读作两个因子的乘积。
 解释器下 1757× = 引擎因子 34.6× × codegen 因子 48.6×（乘积 1682，闭合误差 4.3%）；
@@ -1673,6 +1693,10 @@ tools/attribution/exp_postpass.sh all     # 通用桥内联 pass：4 程序 × 7
 # 反汇编证据
 wasm2wat --enable-all build/bench.wasm -o /tmp/bench.wat
 grep -c 'call 209\|call 210' /tmp/bench.wat
+
+# 路线四（上游 perry-runtime 编进 wasm；前置 ./demo.sh 的链路构件）
+tools/route4/build.sh          # checkout+patch → 桩表 → cargo → build/rt4.wasm + 五项校验
+node tools/route4/coverage.mjs # 桩 vs 上游 js_* 名层覆盖度（179/198，脚本内含异名表）
 ```
 
 一键演示与全量基准：`./demo.sh`（6 步）、`./tools/bench.sh`（末尾打印对照表）。
@@ -1815,7 +1839,7 @@ mem_call_i32(nameId: i32, argc: i32, base: i32) -> i32
 - 字符串密集负载在 A/E 两路中的占比。
 - B 路 364× 内 codegen 形态与 JS 宿主层的相对占比。
 - minhost（JS 最小桩跑 perry wasm）实验因桩语义复杂超时放弃。
-- 路线四的 AOT 形态（`wasm-merge` + `wamrc` 链路未跑）、31 个无对应 `rt.*` 的接法、
+- 路线四的 AOT 形态（`wasm-merge` + `wamrc` 链路未跑）、14 个无对应 `rt.*` 的接法、
   非 fib 负载下 1.09× 是否保持、以及 1.09× 的成因拆分（未逐项插桩）。
 
 ---
@@ -2044,11 +2068,13 @@ auto-optimize 已会按程序实际用到的特性重建运行时子集
 
 ### F.13 路线四实施细节与坑
 
-路线四（3.2）的两个探针都建在 `perry-runtime` path 依赖上，构建形态是
-`wasm32-wasip1` + `crate-type = ["cdylib"]` + `-C link-arg=--export-dynamic`。
-探针在临时目录（`/tmp/rt4`、`/tmp/reuse-probe`），path 依赖指向上游 vendored
-源码，**未入库**，所以附录 B 没有它的一键复现命令；下列事实由产物与
-`wasm-objdump -x` 直接取证。六条记录按发现顺序：
+路线四（3.2）已整体入库为 `tools/route4/`：适配层 crate、上游 wasm32 适配 patch
+（`perry-wasm32.patch`，目标上游 `7ac11b09`）、一键构建 `build.sh` 与校验 `verify.mjs`，
+附录 B 有它的复现命令。构建形态是 `wasm32-wasip1` + `crate-type = ["cdylib"]` +
+release profile（`lto = "thin"`、`opt-level = "s"`、`strip = true`），
+**没有 `.cargo/config.toml`**：带 `-C link-arg=--export-dynamic` 的变体实测
+产物 8,911,301 B / 15,569 个导出，与参照产物的 3,243 个导出集合不一致，已弃用。
+下列事实由产物与 `wasm-objdump -x` 直接取证。六条记录按发现顺序：
 
 1. **rlib 成员必须经 Rust 路径引用**：`use perry_runtime::builtins::js_add;`
    这类引用才会把成员拉进模块；只写 `extern "C"` 块声明的符号不拉入
@@ -2064,8 +2090,10 @@ auto-optimize 已会按程序实际用到的特性重建运行时子集
    目录时 fingerprint 被写坏，需串行构建或分 target 目录。
 5. **字符串表换存指针**：适配层把字符串表条目改存 `StringHeader*`，
    codegen 下发的下标载荷不变，桥内做 index↔pointer 翻译（3.2）。
-6. **规模与一次性开销**：适配层产物 7,298,105 B；runner 的 INIT 段含
-   perry-runtime 的一次性初始化 252 ms，路线三没有这一段，计时时单列。
+6. **规模与一次性开销**：适配层产物 7,314,044 B（`.deps/perry-src` checkout 构建），
+   §3.2 与 8.4 的 7,298,105 B 是原探针产物（源码在 `/tmp` 路径），两者差 15,939 B，
+   逐段比对归因为 Data 段 334 条 `panic!` location 内嵌的源码绝对路径，不是代码差异。
+   runner 的 INIT 段含 perry-runtime 的一次性初始化 252 ms，路线三没有这一段，计时时单列。
 
 ---
 

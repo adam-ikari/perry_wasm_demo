@@ -1,0 +1,325 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 3e72f191..b1e2af7f 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -71,6 +71,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
+ dependencies = [
+  "cfg-if",
++ "const-random",
+  "getrandom 0.3.4",
+  "once_cell",
+  "version_check",
+@@ -6290,6 +6291,7 @@ dependencies = [
+  "cc",
+  "dirs",
+  "encoding_rs",
++ "getrandom 0.4.2",
+  "gimli",
+  "hex",
+  "hickory-proto",
+diff --git a/crates/perry-runtime/Cargo.toml b/crates/perry-runtime/Cargo.toml
+index 8b5e6d75..fec4917c 100644
+--- a/crates/perry-runtime/Cargo.toml
++++ b/crates/perry-runtime/Cargo.toml
+@@ -94,7 +94,7 @@ alloc-mimalloc-hardened = [
+ # imports `dgram` links none of its code. Pure cfg gate, no extra deps. (This is
+ # the first instance of a general per-module gating pattern; more modules can
+ # follow the same shape.)
+-mod-dgram = []
++mod-dgram = ["dep:socket2"]
+ # Per-module Node-API gate (binary-size, issue #6468): compiles the
+ # `node:http2` module-level constant tables (`crate::node_http2_constants` —
+ # the NGHTTP2_*/HTTP_STATUS_* number tables, the `http2.constants`
+@@ -312,10 +312,11 @@ rustc-demangle = "0.1"
+ # the per-PC step cache. Read-only, no_std-capable subset.
+ gimli = { version = "0.34", default-features = false, features = ["read"] }
+ rand = "0.10"
++getrandom = { version = "0.4", features = ["wasm_js"] }
+ # Wide JSON objects hash untrusted property bytes once into their temporary
+ # duplicate-key index. aHash keeps that index randomly keyed/DoS-resistant
+ # without SipHash's serial per-block rounds on this parse hot path.
+-ahash = "0.8.12"
++ahash = { version = "0.8.12", default-features = false, features = ["compile-time-rng", "std"] }
+ perex = { workspace = true, optional = true }
+ # Taffy — flexbox / grid layout engine for the perry/tui module
+ # (#358 Phase 3). Same crate Bevy and Dioxus use; pure Rust, no FFI.
+@@ -401,7 +402,7 @@ resolv-conf = "0.7"
+ # and IPv6-only options are applied before bind; std::net::UdpSocket then drives
+ # send/recv and the common multicast/broadcast/TTL options. SockRef covers the
+ # remaining multicast-interface and source-specific membership controls.
+-socket2 = { workspace = true, features = ["all"] }
++socket2 = { workspace = true, features = ["all"], optional = true }
+ # mimalloc is declared 64-bit-only below (see the target_pointer_width section) —
+ # on arm64_32/ILP32 it is neither used nor compiled.
+ 
+diff --git a/crates/perry-runtime/build.rs b/crates/perry-runtime/build.rs
+index 1453c895..4034a7c5 100644
+--- a/crates/perry-runtime/build.rs
++++ b/crates/perry-runtime/build.rs
+@@ -558,13 +558,17 @@ fn main() {
+     // miscompiled under LLVM's one-return assumption (stack-slot
+     // coloring across the call). See the header comment in the C file.
+     println!("cargo:rerun-if-changed=src/ffi/perry_sjlj.c");
+-    cc::Build::new()
+-        .file("src/ffi/perry_sjlj.c")
+-        // The trampoline is never unwound through (a raise targeting a
+-        // generated frame is always innermost-above it), but keep CFI so
+-        // debuggers and the unwind-table self-check can walk past it.
+-        .flag_if_supported("-fasynchronous-unwind-tables")
+-        .compile("perry_sjlj");
++    // wasm32 has no C setjmp trampoline: the wasm backend routes try/catch
++    // through host imports, so the Rust-side transport never arms one.
++    if !std::env::var("TARGET").unwrap_or_default().starts_with("wasm32") {
++        cc::Build::new()
++            .file("src/ffi/perry_sjlj.c")
++            // The trampoline is never unwound through (a raise targeting a
++            // generated frame is always innermost-above it), but keep CFI so
++            // debuggers and the unwind-table self-check can walk past it.
++            .flag_if_supported("-fasynchronous-unwind-tables")
++            .compile("perry_sjlj");
++    }
+     println!(
+         "cargo:rustc-env=PERRY_RUNTIME_TARGET={}",
+         std::env::var("TARGET").expect("TARGET not set by Cargo")
+diff --git a/crates/perry-runtime/src/box.rs b/crates/perry-runtime/src/box.rs
+index 44079b51..2f55fa2f 100644
+--- a/crates/perry-runtime/src/box.rs
++++ b/crates/perry-runtime/src/box.rs
+@@ -632,6 +632,9 @@ pub fn flush_released_boxes() {
+ /// list live inside the cells. Asserted rather than assumed: a field added to
+ /// any box struct would silently make the link write out of bounds.
+ const ALIGN_OF_BOX_CELL: usize = std::mem::align_of::<Box>();
++// Native-codegen free-list layout contract (64-bit). wasm32 does not use the
++// intrusive box free list, so this lock-step check is gated there.
++#[cfg(target_pointer_width = "64")]
+ const _: () = {
+     assert!(std::mem::size_of::<Box>() == std::mem::size_of::<usize>());
+     assert!(std::mem::size_of::<I32Box>() == std::mem::size_of::<usize>());
+diff --git a/crates/perry-runtime/src/child_process/exec.rs b/crates/perry-runtime/src/child_process/exec.rs
+index 7ed352e5..1bb03bba 100644
+--- a/crates/perry-runtime/src/child_process/exec.rs
++++ b/crates/perry-runtime/src/child_process/exec.rs
+@@ -45,7 +45,9 @@ pub extern "C" fn js_child_process_exec_sync(
+     validate::cp_validate_no_null_bytes("command", &cmd_str);
+ 
+     // Execute the command using the shell, honoring `cwd`/`env` options.
+-    #[cfg(unix)]
++    // wasi keeps the POSIX shell arm: `std::process::Command` exists there
++    // (it just fails at spawn on a host without process support).
++    #[cfg(not(windows))]
+     let mut command = {
+         // Absolute path (Node's `exec` shell) keeps std on `posix_spawn`
+         // instead of the `fork`+`exec` fallback a bare "sh" + `env` triggers
+@@ -281,7 +283,7 @@ pub extern "C" fn js_child_process_exec(cmd_ptr: *const StringHeader, arg1: f64,
+     // `arg1` slot (`exec(cmd, options, cb)`); when `arg1` is the callback
+     // (`exec(cmd, cb)`) it's a closure, so `cp_apply_options` no-ops. `cwd`/
+     // `env` from the options are applied here.
+-    #[cfg(unix)]
++    #[cfg(not(windows))]
+     let mut command = {
+         // Absolute path (Node's `exec` shell) keeps std on `posix_spawn`
+         // instead of the `fork`+`exec` fallback a bare "sh" + `env` triggers
+@@ -504,7 +506,7 @@ fn cp_promisified_run(
+ extern "C" fn cp_promisified_exec(_closure: *const ClosureHeader, cmd_val: f64, opts: f64) -> f64 {
+     validate::cp_validate_command(cmd_val, "command");
+     let cmd = cp_value_to_string(cmd_val).unwrap_or_default();
+-    #[cfg(unix)]
++    #[cfg(not(windows))]
+     let mut command = {
+         // Absolute path (Node's `exec` shell) keeps std on `posix_spawn`
+         // instead of the `fork`+`exec` fallback a bare "sh" + `env` triggers
+diff --git a/crates/perry-runtime/src/date.rs b/crates/perry-runtime/src/date.rs
+index 57c29690..5ea64f5e 100644
+--- a/crates/perry-runtime/src/date.rs
++++ b/crates/perry-runtime/src/date.rs
+@@ -220,6 +220,15 @@ fn timestamp_to_local_components(secs: i64) -> (i32, u32, u32, u32, u32, u32, i6
+     }
+ }
+ 
++/// wasm32 (wasi) has no `localtime_r`/`tm_gmtoff`; fall back to the pure
++/// arithmetic UTC decomposition with a zero offset. The embedder is expected
++/// to supply a fixed UTC clock, matching how `Date` behaves without a host TZ.
++#[cfg(target_family = "wasm")]
++fn timestamp_to_local_components(secs: i64) -> (i32, u32, u32, u32, u32, u32, i64) {
++    let (y, m, d, h, mi, s) = timestamp_to_components(secs);
++    (y, m, d, h, mi, s, 0)
++}
++
+ #[cfg(windows)]
+ fn timestamp_to_local_components(secs: i64) -> (i32, u32, u32, u32, u32, u32, i64) {
+     unsafe {
+diff --git a/crates/perry-runtime/src/eh.rs b/crates/perry-runtime/src/eh.rs
+index 97c198cc..17836ac5 100644
+--- a/crates/perry-runtime/src/eh.rs
++++ b/crates/perry-runtime/src/eh.rs
+@@ -137,6 +137,8 @@ const UNWIND_DATA_REG: (c_int, c_int) = (0, 1); // RAX, RDX
+ const UNWIND_DATA_REG: (c_int, c_int) = (0, 1); // R0/X0, R1/X1
+ #[cfg(target_arch = "x86")]
+ const UNWIND_DATA_REG: (c_int, c_int) = (0, 2); // EAX, EDX
++#[cfg(target_arch = "wasm32")]
++const UNWIND_DATA_REG: (c_int, c_int) = (0, 1); // no native unwind on wasm
+ 
+ /// `PERRYJS\0` — vendor-tagged exception class. The personality is
+ /// class-agnostic (every Perry landing pad is a catch-all), but the tag keeps
+@@ -236,6 +238,8 @@ pub unsafe extern "C" fn perry_eh_personality(
+             return _URC_FATAL_PHASE1_ERROR;
+         }
+     };
++    // wasm32 has no `libc::dladdr`; the trace aid is native-only.
++    #[cfg(not(target_arch = "wasm32"))]
+     if eh_trace_enabled() {
+         let mut before: c_int = 0;
+         let ip = _Unwind_GetIPInfo(context, &mut before);
+diff --git a/crates/perry-runtime/src/fs/mod.rs b/crates/perry-runtime/src/fs/mod.rs
+index 7875ec48..528f69c7 100644
+--- a/crates/perry-runtime/src/fs/mod.rs
++++ b/crates/perry-runtime/src/fs/mod.rs
+@@ -1780,6 +1780,10 @@ pub(crate) unsafe fn js_fs_symlink_result(target_value: f64, path_value: f64) ->
+     let res = std::os::unix::fs::symlink(&target, &path);
+     #[cfg(windows)]
+     let res = std::os::windows::fs::symlink_file(&target, &path);
++    // wasi exposes no symlink syscall through std; surface EPERM like a
++    // host that forbids the operation.
++    #[cfg(not(any(unix, windows)))]
++    let res: std::io::Result<()> = Err(std::io::Error::from_raw_os_error(1));
+     match res {
+         Ok(()) => Ok(()),
+         Err(err) => Err(build_fs_error_value_with_dest(
+diff --git a/crates/perry-runtime/src/gc/roots/shadow_stack.rs b/crates/perry-runtime/src/gc/roots/shadow_stack.rs
+index ac6894f4..fda04661 100644
+--- a/crates/perry-runtime/src/gc/roots/shadow_stack.rs
++++ b/crates/perry-runtime/src/gc/roots/shadow_stack.rs
+@@ -149,6 +149,9 @@ pub const SHADOW_ENTRY_META_OFFSET: usize = 8;
+ /// [`SLOT_ACTIVE`] as a public constant, for the codegen contract.
+ pub const SHADOW_SLOT_ACTIVE_BIT: usize = SLOT_ACTIVE;
+ 
++// Native-codegen shadow-stack contract. The offsets assume 64-bit pointers;
++// wasm32 uses opaque handles and never indexes this buffer from generated code.
++#[cfg(target_pointer_width = "64")]
+ const _: () = {
+     assert!(std::mem::offset_of!(ShadowStackState, ptr) == SHADOW_STATE_PTR_OFFSET);
+     assert!(std::mem::offset_of!(ShadowStackState, len) == SHADOW_STATE_LEN_OFFSET);
+diff --git a/crates/perry-runtime/src/map.rs b/crates/perry-runtime/src/map.rs
+index 78a6ae60..42a7d2c4 100644
+--- a/crates/perry-runtime/src/map.rs
++++ b/crates/perry-runtime/src/map.rs
+@@ -1325,6 +1325,10 @@ pub struct MapHeader {
+     pub compaction_epoch: u32,
+ }
+ 
++// Native-codegen lock-step contract. Offsets assume 64-bit pointers; wasm32
++// reaches these structs only through field access (opaque handles), so the
++// hardcoded offsets are irrelevant there.
++#[cfg(target_pointer_width = "64")]
+ const _: () = {
+     assert!(std::mem::offset_of!(MapHeader, size) == 0);
+     assert!(std::mem::offset_of!(MapHeader, capacity) == 4);
+diff --git a/crates/perry-runtime/src/native_handle.rs b/crates/perry-runtime/src/native_handle.rs
+index 8d4d0901..126f7b34 100644
+--- a/crates/perry-runtime/src/native_handle.rs
++++ b/crates/perry-runtime/src/native_handle.rs
+@@ -74,6 +74,12 @@ fn current_os_thread_id() -> u64 {
+         }
+         u64::from(unsafe { GetCurrentThreadId() })
+     }
++    // wasi is single-threaded: there is exactly one thread, so a fixed id is
++    // both correct and free of the pthread dependency wasm32 lacks.
++    #[cfg(not(any(unix, windows)))]
++    {
++        1
++    }
+ }
+ 
+ static MAIN_OS_THREAD_ID: AtomicU64 = AtomicU64::new(0);
+diff --git a/crates/perry-runtime/src/object/mod.rs b/crates/perry-runtime/src/object/mod.rs
+index 5388a2b6..185b523a 100644
+--- a/crates/perry-runtime/src/object/mod.rs
++++ b/crates/perry-runtime/src/object/mod.rs
+@@ -1625,6 +1625,9 @@ const _: () = assert!(std::mem::offset_of!(ObjectMeta, array_tail_object_hot) ==
+ // `ObjectHeader.meta` then this word (perry-codegen `expr/index_get` and
+ // `property_get/composed_ics.rs`). Keep in lock-step.
+ const _: () = assert!(std::mem::offset_of!(ObjectMeta, elements) == 96);
++// On ILP32 `meta` follows the 4-byte `_slot_alignment_padding`, so its offset
++// differs; codegen's fixed-offset read only applies to the 64-bit layout.
++#[cfg(target_pointer_width = "64")]
+ const _: () = assert!(std::mem::offset_of!(ObjectHeader, meta) == 8);
+ const _: () = assert!(std::mem::size_of::<crate::array::ArrayHeader>() == 8);
+ 
+diff --git a/crates/perry-runtime/src/perf_histogram.rs b/crates/perry-runtime/src/perf_histogram.rs
+index 0492a614..260422c3 100644
+--- a/crates/perry-runtime/src/perf_histogram.rs
++++ b/crates/perry-runtime/src/perf_histogram.rs
+@@ -269,14 +269,12 @@ impl Histogram {
+         let mut it = self.iter();
+         while it.step() {
+             if it.count != 0 {
+-                // Rust 1.98's algebraic_* float methods let LLVM reassociate
+-                // and vectorize this reduction (Node's own HdrHistogram-based
+-                // stddev is already a bucketed approximation, not a value
+-                // any spec requires bit-exact, so reordering is safe here).
+-                let dev = self.median_equivalent(it.value) as f64;
+-                let dev = dev.algebraic_sub(mean);
+-                let sq = dev.algebraic_mul(dev).algebraic_mul(it.count as f64);
+-                geometric_dev_total = geometric_dev_total.algebraic_add(sq);
++                // Node's own HdrHistogram-based stddev is already a bucketed
++                // approximation, not a value any spec requires bit-exact, so
++                // the plain (non-reassociating) form is fine here.
++                let dev = self.median_equivalent(it.value) as f64 - mean;
++                let sq = dev * dev * it.count as f64;
++                geometric_dev_total += sq;
+             }
+         }
+         (geometric_dev_total / self.total_count as f64).sqrt()
+diff --git a/crates/perry-runtime/src/set.rs b/crates/perry-runtime/src/set.rs
+index e8393cca..47737d14 100644
+--- a/crates/perry-runtime/src/set.rs
++++ b/crates/perry-runtime/src/set.rs
+@@ -597,6 +597,8 @@ pub struct SetHeader {
+     pub compaction_epoch: u32,
+ }
+ 
++// Native-codegen lock-step contract (64-bit pointer layout); see map.rs.
++#[cfg(target_pointer_width = "64")]
+ const _: () = {
+     assert!(std::mem::offset_of!(SetHeader, size) == 0);
+     assert!(std::mem::offset_of!(SetHeader, capacity) == 4);
+diff --git a/crates/perry-runtime/src/tls_hot.rs b/crates/perry-runtime/src/tls_hot.rs
+index 860eb921..e4afa84e 100644
+--- a/crates/perry-runtime/src/tls_hot.rs
++++ b/crates/perry-runtime/src/tls_hot.rs
+@@ -211,7 +211,11 @@ pub(crate) struct HotTls {
+ /// reading the wrong cell.
+ pub const HOT_TLS_INLINE_STATE_OFFSET: usize = 8;
+ pub const HOT_TLS_IMPLICIT_THIS_OFFSET: usize = 128;
++// These offsets are hard-coded only by Apple-aarch64 generated code, so the
++// pinning check is 64-bit only; wasm32 has no inline hot-cache access.
++#[cfg(target_pointer_width = "64")]
+ const _: () = assert!(std::mem::offset_of!(HotTls, inline_state) == HOT_TLS_INLINE_STATE_OFFSET);
++#[cfg(target_pointer_width = "64")]
+ const _: () = assert!(std::mem::offset_of!(HotTls, implicit_this) == HOT_TLS_IMPLICIT_THIS_OFFSET);
+ const _: () = assert!(std::mem::offset_of!(crate::arena::InlineArenaState, data) == 0);
+ 
+diff --git a/crates/perry-runtime/src/value/dynamic_object.rs b/crates/perry-runtime/src/value/dynamic_object.rs
+index ece7502f..2f6cc456 100644
+--- a/crates/perry-runtime/src/value/dynamic_object.rs
++++ b/crates/perry-runtime/src/value/dynamic_object.rs
+@@ -73,7 +73,10 @@ pub extern "C" fn js_value_length_f64(value: f64) -> f64 {
+         // `String.split()` collapses to 0, so `for…of` loops zero times
+         // and `segments.length === 0` is wrongly true). See clean_arr_ptr
+         // for the same platform split.
++        // wasm32 has 32-bit addresses, so the macOS 2 TB floor is not just
++        // wrong but unrepresentable; it uses the low-allocator floor.
+         #[cfg(any(
++            target_arch = "wasm32",
+             target_os = "android",
+             target_os = "linux",
+             target_os = "windows",
+@@ -84,6 +87,7 @@ pub extern "C" fn js_value_length_f64(value: f64) -> f64 {
+         ))]
+         let heap_min: usize = 0x1000;
+         #[cfg(not(any(
++            target_arch = "wasm32",
+             target_os = "android",
+             target_os = "linux",
+             target_os = "windows",

@@ -1,0 +1,21 @@
+[package]
+name = "rt4"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "路线四运行时: 值语义复用上游 perry-runtime 源码的 rt.* 适配层 (wasm32-wasip1 cdylib)"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = "s"
+# fat LTO 读 perry_runtime rlib bitcode 失败 (rust-lld 报 bitcode magic/版本正常仍拒绝),
+# 只能用 thin —— 论文 F.13 坑 3
+lto = "thin"
+panic = "abort"
+strip = true
+
+[dependencies]
+perry-runtime = { path = "../../.deps/perry-src/crates/perry-runtime", default-features = false }
