@@ -6,7 +6,7 @@ A Systematic Exploration from Runtime Modularization through Performance
  Attribution to an Upstream Compiler Fix**
 
 **作者：** Adam
-**日期：** 2026-09-21（2026-09-26 修订：新增路线四验证、nameId 缓存复测修正与附录 A.11 原始样本）
+**日期：** 2026-09-21（2026-09-28 修订：新增路线四 AOT 形态 A/B、nameId 缓存复测修正与附录 A.11 原始样本）
 
 ---
 
@@ -34,7 +34,8 @@ bench 快 7.3×），再直接修改上游 `perry-codegen-wasm` 的发射点，
 其一把运行时一侧再推一步：不再手写子集，而是把上游 `perry-runtime` 源码直接编进 wasm（路线四），
 薄适配层把 13 个桥的值语义换成上游实现——正负向输出与路线三逐字节一致、导入段 28 项全为 WASI、
 `rt.*` 桩的上游对应实现 179/198（90%，名层口径），代价是体积 16.9 KB → 7.3 MB（约 430×）
-与桥路径 1.09× 的常数。
+与桥路径常数——解释器 1.09×、AOT 0.98×（2026-09-28 同日交错 n=11，解释器下那 8.5% 桥常数在 AOT 下被消除；见 3.2 与附录 A.12）。
+2026-09-28 又补了路线四的 AOT 形态 A/B：rt4 AOT P50 = 5.121 ms 对 rt3（E 链同构）5.240 ms = 0.98×，AOT 产物 19.2 MB（路线三 72.7 KB）。
 其二复测了 nameId 缓存：同机交错 A/B 的降幅是 2.7%，而 9-19 记录的 −43% 属当日环境读数，不可外推（见 6.1）。
 
 **关键词：** WebAssembly；TypeScript 编译器；运行时模块化；性能定位；类型特化；WAMR
@@ -89,7 +90,11 @@ subset, the upstream `perry-runtime` sources are compiled straight into wasm
 upstream implementations — positive and negative outputs stay byte-identical
 to route 3, the import section is 28 entries of pure WASI, and 179/198 `rt.*`
 stubs have upstream counterparts (90%, name-layer), at the cost of size
-(16.9 KB → 7.3 MB, about 430×) and a 1.09× constant on the bridge path.
+(16.9 KB → 7.3 MB, about 430×) and a bridge-path constant — interpreter 1.09×,
+AOT 0.98× (2026-09-28 interleaved same-machine A/B, n=11; the 8.5% interpreter
+constant vanishes under AOT; see §3.2 and Appendix A.12). On 2026-09-28 the
+route-4 AOT form was added: rt4 AOT P50 = 5.121 ms vs rt3 (E-link, same
+pipeline) 5.240 ms = 0.98×; the AOT artifact is 19.2 MB (72.7 KB for route 3).
 The second re-measures the nameId cache: an interleaved same-machine A/B run
 gives 2.7%, so the −43% recorded on 9-19 is a same-day environmental reading
 that does not extrapolate (see §6.1).
@@ -142,7 +147,8 @@ RQ1 要简单些，但答案有所保留，见 3.1 与 8.4。
     宿主只剩 WASI 的一个调用（3.2–3.4）。`rt.*` 的调用约定、业务代码、codegen 均未改动。
     2026-09-24/26 的追加验证在此之上给出路线四：把上游 `perry-runtime` 源码直接编进 wasm，
     导入段 100% 为 WASI、上游对应实现覆盖 179/198 个 `rt.*` 桩（90%，名层口径）、
-    正负向输出与路线三一致（3.2）。
+    正负向输出与路线三一致（3.2）；2026-09-28 补 AOT 形态 A/B，rt4 AOT 对 rt3（E 链）
+    P50 = 0.98×（3.2、附录 A.12），解释器下 1.09× 的桥常数在 AOT 下被消除。
 2. **一套 `rt.*` ABI 的逆向方法**：在没有规范、但有可运行参考实现时，把参考实现当 oracle 插桩，而不是读源码猜（3.3）。
 3. **一套可复用的性能改进方法**：把总倍数拆成乘积因子、用手写的干净对照 wasm 隔离引擎、做闭合校验、再用独立引擎交叉验证（第 5 章）。
     它不停在"wasm 比原生慢 N 倍"这一步，而要拆出这 N 倍里哪一部分属于引擎、哪一部分属于 codegen。
@@ -253,7 +259,7 @@ RQ1 的答案有一部分是肯定的。
 | 一·C 桥接 | 宿主里用 C 手写 `rt.*`，编成 `libperry_rt.so`，`iwasm --native-lib` 动态载入 | 已实施为探针，后废弃为历史背景 | 成本随程序用到的语言特性线性增长 |
 | 二·AOT 内联 | `wasm-ld` 把运行时 wasm 静态库与 codegen 输出链成单模块（同构于 native 路径）；或走 Component Model | 未实施 | 需 codegen 产出可重定位对象，或链接器把 import 解析成本地符号；Component Model 则与零拷贝约定冲突 |
 | 三·运行时 wasm 模块 | 运行时编成独立 wasm 模块，导出同名 `rt.*` 与 memory，业务模块 import 它，WAMR 多模块链接 | **当前实现，已实测** | 运行时的 OS 强耦合模块需裁剪（见 3.5） |
-| 四·运行时源码复用 | 上游 `crates/perry-runtime` 作 path 依赖编成 `wasm32-wasip1` cdylib，薄适配层把 `rt.*` 转发到 `js_*` | **2026-09-24 探针 + 2026-09-26 适配层，已实测** | 体积 16.9 KB → 7.3 MB（约 430×）；桥路径常数 1.09×；19 个 `rt.*` 名层无对应实现（5 个已就地改写） |
+| 四·运行时源码复用 | 上游 `crates/perry-runtime` 作 path 依赖编成 `wasm32-wasip1` cdylib，薄适配层把 `rt.*` 转发到 `js_*` | **2026-09-24 探针 + 2026-09-26 适配层 + 2026-09-28 AOT A/B，已实测** | 体积 16.9 KB → 7.3 MB（约 430×）；桥路径常数 解释器 1.09× / AOT 0.98×；19 个 `rt.*` 名层无对应实现（5 个已就地改写） |
 
 路线一是探针，不是终点。它测定了 ABI，也证明了"每个平台重写一遍运行时"这条路不可行：13 个手写实现只够支撑纯原始值的程序，程序一用数组立刻报错。
 
@@ -332,12 +338,26 @@ demo 在路线三下就已通过，而那时 198 个桩全是 trap，故其执�
 rlib bitcode 失败（magic 与版本均正常），改 `lto = "thin"` 绕过；
 并发 cargo 共用同一 target 会写坏 fingerprint。
 
+**AOT 形态 A/B（2026-09-28）**：路线四此前只在解释器下计时，AOT 形态未测。补测走与 E 路
+同链路（wasm-merge 合并单模块 → `patch_rt4_merged.mjs` 后处理 → `wasm-as` →
+`wamrc` O3 → `aot_time`），两份输入只差 rt 模块：路线三 `rt_bench.wasm`（16,928 B）
+对路线四 `rt4.wasm`（7,298,105 B）。同日交错 12 轮弃第 1 轮取 11 样本（与 `aot_e.sh` 同口径）：
+rt3 AOT P50 = 5.240 ms、rt4 AOT P50 = 5.121 ms = **0.98×**（原始样本见附录 A.12）。
+解释器下那 8.5% 的桥常数在 AOT 下被消除——StringHeader 指针层与
+`RuntimeHandleScope`/thread-local rooting 的开销是解释器 dispatch 层的常数，
+AOT 把桥函数体内联成机器码后这部分归零。AOT 产物 72,652 B（rt3）对 19,199,376 B
+（rt4，约 264×）。patch 还处理一处 wamrc 限制：`call_indirect` 的 argv cell 上限 64
+（`aot_emit_function.c:1994`，依据 `wasm_exec_env.c:44` 的 `argv_buf=64×u32`），
+合并模块里恰有 1 处 type `$407` = `(i32, f64×32) -> f64` = 65 cell 超限；
+结构性断言全模块无函数实现该签名（一旦执行必 trap），故改写为 `unreachable`
+是等价变换（实现见附录 F.13，复现命令见附录 B）。
 结论：路线四把 RQ2 里"补齐完整 JS 语义等于重写一遍 `perry-runtime`"的前提改写成"把上游运行时编进
 wasm"，链接与执行层面已无阻塞。剩余 182 个桩分两段：168 个上游有对应实现、接线是搬运
 （多数只差参数整形），14 个名层无对应才需要宿主侧实现或按 wasm 语义改写
 （该类共 19 个，适配层已就地改写 5 个）。
-需要划清的边界是：路线三承载了本文全部性能矩阵，路线四只做了正确性验证与单基准计时，
-其 AOT 形态、14 个无对应缺口的接法、以及 1.09× 的成因拆分都未测（见 8.6）。
+需要划清的边界是：路线三承载了本文全部性能矩阵；路线四做了正确性验证、单基准解释器计时
+（1.09×）与 AOT 形态 A/B（0.98×），仍待测的是 14 个无对应缺口的接法、1.09× 的逐项插桩
+成因拆分，以及非 fib 负载下的桥路径开销（见 8.6）。
 
 ### 3.3 `rt.*` ABI 的逆向：把参考实现当 oracle
 
@@ -1401,10 +1421,11 @@ A 的冷启动 real 含 `bench_time` 固定的一次预热，与 B/C 的"一次�
 路线四改变了这个前提（2026-09-24/26 实测）：不必重写，把上游 `perry-runtime` 直接编进 wasm 即可，
 `rt.*` 桩的上游对应实现 179/198（名层口径）、导入段 100% 为 WASI、正负向输出与路线三一致，
 对象/数组/闭包缺口依旧存在。
-代价换了位置：体积 16,928 B → 7,298,105 B（约 430×，多模块共享下可摊薄）、桥路径 1.09×、
-一次性 INIT 段 252 ms；余下 19 个名层无对应者中 5 个已就地改写、
+代价换了位置：体积 16,928 B → 7,298,105 B（约 430×，多模块共享下可摊薄）、桥路径常数
+（解释器 1.09×、AOT 0.98×）、一次性 INIT 段 252 ms；余下 19 个名层无对应者中 5 个已就地改写、
 14 个仍要宿主侧实现或按 wasm 语义改写。
-这条路线只过了单基准计时与 13 个桥的值语义，AOT 形态与完整程序覆盖未验（见 8.6）。
+这条路线过了单基准计时、13 个桥的值语义与 AOT 形态 A/B（0.98×，2026-09-28，附录 A.12），
+完整程序覆盖仍待验（见 8.6）。
 适合这套方案的是**宿主可控、语言子集可裁剪**的场景（嵌入式规则脚本、计算密集的插件、既不想源码外流又不想放弃 TS 写法的内部交付）；
 把用满 npm 生态的应用迁移至此，首先要解决的问题不是源码保护，而是运行时要补多少。
 
@@ -1424,8 +1445,8 @@ typed ABI 规划文档也说明其全部 file:line 已对 `/tmp/perry-src` HEAD 
 以下结论在材料中已标注推断，本文保留同等不确定性，汇总见附录 E。阅读本文数字时应注意的划分：
 
 - **实测**：六路 P50 表、乘积因子与闭合校验、基线审计三条证据、隔离实验 `nohost` 系列、patch 前后 P50 与反汇编计数、
-  pass 的 28 次逐字节一致与覆盖率；路线四的导入段（28 项全 WASI）、`rt.*` 上游对应实现 179/198、
-  正负向逐字节一致，以及 103.638 / 112.489 / 110.893 / 113.929 四组 15 样本 P50（附录 A.11）。
+  正负向逐字节一致，以及 103.638 / 112.489 / 110.893 / 113.929 四组 15 样本 P50（附录 A.11）；
+  路线四 AOT 形态，rt4 AOT P50 5.121 ms 对 rt3 5.240 ms = 0.98×（附录 A.12，2026-09-28）。
 - **推断**：rt 侧的分派与 NaN-box 编解码占掉每层 1.2 µs 的大头（未逐项插桩）；
   B 路 364× 内 codegen 形态与 JS 宿主层的相对占比未拆分；E 路 49×→108× 的分母定义说明；
   D 路 fib/循环拆分（约 4 ms / 约 1.5 ms）由指令量比例推算；D 编译 1.9 s 的耗时构成未拆分；
@@ -1436,8 +1457,8 @@ typed ABI 规划文档也说明其全部 file:line 已对 `/tmp/perry-src` HEAD 
 - **条件性 / 未复现**：坑 4 的 `initializing thread failed!`；`--enable-llvm-pgo` 未验证；
   nameId 缓存 −43%（2026-09-19 批）在 2026-09-26 的同机交错复测中不可复现（交错降幅 2.7%，见 6.1）。
 - **未测**：WAMR LLVM JIT（需 `build_llvm.sh` 自编全量 LLVM，收益与 AOT 同源，暂无必要）；E 路冷启动；
-  字符串密集负载在 A/E 两路中的占比；路线四的 AOT 形态、14 个无对应 `rt.*` 缺口的接法、
-  以及非 fib 负载下的桥路径开销。
+  字符串密集负载在 A/E 两路中的占比；路线四 14 个无对应 `rt.*` 缺口的接法、
+  1.09× 的逐项插桩成因拆分，以及非 fib 负载下的桥路径开销。
 
 ---
 
@@ -1455,8 +1476,9 @@ typed ABI 规划文档也说明其全部 file:line 已对 `/tmp/perry-src` HEAD 
 一次分发这一半成立。代价是运行时的 OS 强耦合模块需要裁剪，且完整 JS 语义（对象、闭包、GC）补齐的量级不变。
 路线四（2026-09-24/26 追加验证）把"重写一遍运行时"这个前提也松开了：把上游 `perry-runtime` 源码编进 wasm，
 导入段 100% 是 WASI、`rt.*` 上游对应实现 179/198、正负向输出与路线三逐字节一致；
-代价换成体积约 430× 与桥路径 1.09×，余下 182 个桩（168 待搬运接线 + 14 无对应）
-与对象/闭包/GC 仍然待补，且它只过单基准与 13 个桥的值语义。
+代价换成体积约 430× 与桥路径常数（解释器 1.09×、AOT 0.98×，解释器下的桥常数在
+AOT 下被消除），余下 182 个桩（168 待搬运接线 + 14 无对应）与对象/闭包/GC 仍然待补，
+且它只过单基准与 13 个桥的值语义（AOT 形态已补 A/B，见 3.2 与附录 A.12）。
 
 性能方面：这部分工作是被途中发现的异常推着做的，不是一开始的目标；比数字更值得留下的一条规则是：总倍数必须读作两个因子的乘积。
 解释器下 1757× = 引擎因子 34.6× × codegen 因子 48.6×（乘积 1682，闭合误差 4.3%）；
@@ -1624,6 +1646,8 @@ typed ABI 规划文档也说明其全部 file:line 已对 `/tmp/perry-src` HEAD 
 | `build/bench_perry_native`（perry 原生产物） | 16.3 MB（17,099,736 B） |
 | `build/bench_merged.aot`（E 路 AOT 产物） | 74 KB |
 | `rt4.wasm`（路线四适配层产物，2026-09-26） | 7298105 |
+| `aot_rt3.aot`（路线三 AOT 产物，E 链同构，2026-09-28） | 72652 |
+| `aot_rt4.aot`（路线四 AOT 产物，2026-09-28） | 19199376 |
 | `rt_nocache.wasm`（按名扫描复刻版，缓存 A/B 对照） | 16818 |
 
 ### A.11 2026-09-26 复测原始样本
@@ -1648,6 +1672,39 @@ P50 之比 = 112.489 ÷ 103.638 = 1.085（路线四慢 8.5%，正文记作 1.09�
 | 按名扫描 | 105.895, 110.781, 111.194, 112.857, 113.033, 113.290, 113.845, 113.929, 114.042, 115.261, 117.491, 118.076, 118.418, 118.965, 135.577 | 105.895 | **113.929** | 135.577 |
 
 交错降幅 = 1 − 110.893 ÷ 113.929 = 2.66%（正文记作 2.7%，修正说明见 6.1）。
+
+### A.12 路线四 AOT 形态 A/B 原始样本（2026-09-28）
+
+与 E 路（§3.5、附录 B）同链路：wasm-merge 把 `bench_link.wasm`（app）与 rt 模块合并成单模块，
+`patch_rt4_merged.mjs` 后处理（删 `__data_end`/`__heap_base` 导出、织 `_initialize` wrapper、
+改写超 64-cell `call_indirect`），`wasm-as` 重编，`wamrc` O3/znver3 生成 AOT。两份输入只差 rt：
+路线三 `rt_bench.wasm`（16,928 B）对路线四 `rt4.wasm`（7,298,105 B）。计时用 `build/aot_time`，
+每轮独立进程、进程内 1 次预热 + 1 次计时，12 轮同日交错（弃第 1 轮取 11 样本中位数，
+与 `aot_e.sh` 同口径）。原始记录在 `build/route4_aot_runs.txt`：
+
+| 轮次 | rt3 (ms) | rt4 (ms) |
+|---:|---:|---:|
+| 1 | 5.285 | 5.090 |
+| 2 | 4.980 | 4.926 |
+| 3 | 5.029 | 5.121 |
+| 4 | 5.240 | 5.381 |
+| 5 | 5.126 | 5.053 |
+| 6 | 5.753 | 6.196 |
+| 7 | 6.513 | 5.228 |
+| 8 | 5.186 | 5.117 |
+| 9 | 5.284 | 5.387 |
+| 10 | 5.714 | 5.064 |
+| 11 | 5.689 | 5.057 |
+| 12 | 5.013 | 5.973 |
+
+弃第 1 轮后取 11 样本中位数：rt3 = 5.240 ms、rt4 = 5.121 ms，比值 0.98×。
+两份 AOT 输出均 == `fib(29) = 514229`、`sum = 499999500000`（`aot.sh` 第 2 步校验）。
+AOT 产物尺寸：`aot_rt3.aot` 72,652 B、`aot_rt4.aot` 19,199,376 B（约 264×）。
+
+解释器下路线四慢 1.09×（附录 A.11），AOT 下反为 0.98×——8.5% 的桥常数被消除。
+成因：StringHeader 指针层与 `RuntimeHandleScope`/thread-local rooting 的开销是解释器
+dispatch 层的常数，AOT 把桥函数体内联成机器码后这部分归零；这与 §5「引擎因子在 AOT 下
+归零」同源。注意 A.11 与 A.12 跨日不可比（不同 runner、不同进程边界），A/B 只在各自同日成对读。
 
 ---
 
@@ -1697,7 +1754,7 @@ grep -c 'call 209\|call 210' /tmp/bench.wat
 # 路线四（上游 perry-runtime 编进 wasm；前置 ./demo.sh 的链路构件）
 tools/route4/build.sh          # checkout+patch → 桩表 → cargo → build/rt4.wasm + 五项校验
 node tools/route4/coverage.mjs # 桩 vs 上游 js_* 名层覆盖度（179/198，脚本内含异名表）
-```
+tools/route4/aot.sh 12       # 路线四 AOT 形态 A/B：rt3 与 rt4 合并单模块→wamrc→aot_time 交错计时（见 A.12）
 
 一键演示与全量基准：`./demo.sh`（6 步）、`./tools/bench.sh`（末尾打印对照表）。
 
@@ -2094,6 +2151,17 @@ release profile（`lto = "thin"`、`opt-level = "s"`、`strip = true`），
    §3.2 与 8.4 的 7,298,105 B 是原探针产物（源码在 `/tmp` 路径），两者差 15,939 B，
    逐段比对归因为 Data 段 334 条 `panic!` location 内嵌的源码绝对路径，不是代码差异。
    runner 的 INIT 段含 perry-runtime 的一次性初始化 252 ms，路线三没有这一段，计时时单列。
+7. **AOT 形态补测（2026-09-28）**：WAMR AOT 不支持 import memory（§3.5），
+   路线四的双模块结构（app `import rt.memory`）无法整体 AOT，故走与 E 路同链路：
+   `wasm-merge`（binaryen）合并单模块 → `patch_rt4_merged.mjs` 后处理 → `wasm-as` →
+   `wamrc`。该 patch 是 `tools/attribution/patch_merged.mjs` 的宽容版：rt 侧无
+   `__data_end`/`__heap_base` 导出时跳过删除（路线四形态），并织 `_initialize` wrapper
+   调 `__wasm_call_ctors` 再跳 `_start`。另处理 wamrc 的 `call_indirect` argv cell 上限 64
+   （`aot_emit_function.c:1994`，依据 `wasm_exec_env.c:44` 的 `argv_buf=64×u32`）：
+   合并模块里 1 处 type `$407` = `(i32, f64×32) -> f64` = 65 cell 超限，patch 先做结构性
+   断言——全模块的 func/import 头均不实现该签名（一旦执行必 trap），成立才改写为
+   `unreachable`；断言不成立即中止，绝不静默改写。结果见附录 A.12：rt4 AOT P50
+   5.121 ms 对 rt3 5.240 ms = 0.98×。
 
 ---
 

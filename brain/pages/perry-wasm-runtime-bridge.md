@@ -5,7 +5,7 @@ category: concept
 status: active
 tags: [perry, wasm, wamr, abi]
 created: "2026-09-15T05:11:48"
-updated: "2026-09-27T09:35:36"
+updated: "2026-09-28T06:04:44"
 ---
 
 <!-- compiled_truth -->
@@ -172,4 +172,10 @@ perry 的 wasm 后端产出的模块声明 211 个 `rt.*` 导入，把"运行时
   kind: reversal
   summary: "推翻两条 2026-09-24/26 期间的结论: (1) 覆盖度 166/198≈84% 不成立——原脚本不可复现且算术 150+16+31≠198, 实际名层三层比对为 179/198≈90% (direct 122/near 27/alias 30, 异名表 22→30 条), 余 19 而非 31 (URLSearchParams 6 条有 js_url_search_params_* 对应, 从缺口移入 alias); (2) 语义探针命令 iwasm -f rt_is_truthy … 1.0 / rt_js_add 2.0 3.0 不可复现——rt4 导出名无 rt_ 前缀且 i64 入参不接受十进制浮点(strtoull 拒绝), 换成 is_truthy 0/0x3FF0000000000000 与 js_add 0x4000000000000000 0x4008000000000000 三条位型探针, verify.mjs 第 5 步 2026-09-27 复跑通过"
   source: "coverage.mjs 三层判定 + iwasm 2.4.3 实测 + 论文 6536749"
+  affects: [perry-wasm-runtime-bridge]
+
+- time: 2026-09-28T06:04:44
+  kind: decision
+  summary: "路线四 AOT 实测：rt4 AOT P50 = 5.121 ms vs rt3（E链）5.240 ms = 0.98×（同日交错 n=11），路线三/四 AOT 下速度完全对齐；解释器下 1.09× 差距被 AOT 消除。aot_rt3.aot=72652 B、aot_rt4.aot=19199376 B（19 MB）。patch_rt4_merged.mjs 改写了1处超 64-cell call_indirect（type $407, i32+f64×32→f64）为 unreachable（structural-assertion 等价：全模块无函数实现该签名，必 trap）。"
+  source: "tools/route4/aot.sh 12 跑 12 轮交错 A/B，弃第1轮，build/route4_aot_runs.txt; PASS: rt3/rt4 AOT 输出均 == fib(29)=514229 + sum=499999500000"
   affects: [perry-wasm-runtime-bridge]
