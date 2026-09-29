@@ -6,7 +6,8 @@ A Systematic Exploration from Runtime Modularization through Performance
  Attribution to an Upstream Compiler Fix**
 
 **作者：** Adam
-**日期：** 2026-09-21（2026-09-28 修订：新增路线四 AOT 形态 A/B、nameId 缓存复测修正与附录 A.11 原始样本）
+**日期：** 2026-09-21（2026-09-28 修订：新增路线四 AOT 形态 A/B、nameId 缓存复测修正与附录 A.11 原始样本；
+同日叙事修订——2.3 补外部文献定位与「参考文献」节、1.2 地图 1 贯穿实例、4.2 增跨批次测量纪律三条）
 
 ---
 
@@ -140,6 +141,27 @@ RQ1 要简单些，但答案有所保留，见 3.1 与 8.4。
 验证途中出现的性能异常把问题引到代价一侧，第 4 章评估代价，第 5 章把代价拆到可闭合校验，第 6 章回到源头修，第 7–8 章给边界与效度威胁。
 每一步的数字都带测量口径，凡材料标为推断的，本文保留同等标注。
 
+**图 1：贯穿实例。**
+本文不自建抽象例子，全篇用同一处真实代码承载归因、两种修复与复测，四栏对照如下（`BASE` 为影子栈槽地址，
+按 6.2 的写法略去其求值；nameId 8/12 来自 rt 固定桥接表，见 3.3.1）：
+
+```plain
+(a) 源码 src/bench.ts 的热点           (b) perry wasm 后端发射（patch 前，bench.wasm）
+    if (n < 2) return n;                   (call $mem_call_i32 (f64.const 12) (f64.const 1) BASE)   ; is_truthy
+    return fib(n-1) + fib(n-2);            (drop (call $mem_call (f64.const 8) (f64.const 2) BASE))  ; js_add
+    for (...) { sum += i; }          →     两条都是"把一次运算交给一段通用实现"：参数按 u64 读出 → decode →
+                                            按名/缓存分派 → encode → 回写 BASE。A 路跨模块，E 路已合并为同模块（3.5）
+
+(c) 修复后的形态（同一处代码）            (d) 代价与收敛（本文实测）
+    i64.ne (i64.load BASE) TAG_FALSE   fib(29) 共 1,664,079 次逻辑调用，热路径 2 次/层桥接调用；
+    f64.add 于两个 reinterpret 之间     AOT 下桥接函数体占方法耗时 95.8%；
+   （后处理 pass 与上游 patch 发射的     `call $mem_call` 8 → 6，`call $mem_call_i32` 2 → 0，
+      是指令序列，此处取其语义核心）     `f64.add` 0 → 3，`i64.ne` 0 → 2，产物 9780 B → 9561 B；
+                                        E 路 P50 122.112 ms → 3.891 ms（快 31.4×，n=11）
+```
+
+第 5 章要拆的就是 (b) 这两行的归属，第 6 章的两种修法是把 (b) 变成 (c) 的两条不同路径，6.1 的复测修正则说明 (d) 里哪些数字可迁移、哪些不可迁移。
+
 ### 1.3 本文的贡献
 
 下面五条按探索顺序排列：1–2 完成运行验证，3–4 评估代价与定位，5 修复。
@@ -159,7 +181,8 @@ RQ1 要简单些，但答案有所保留，见 3.1 与 8.4。
 
 ### 1.4 材料与方法声明
 
-本文不引外部文献。素材全部来自本仓库的一手实测记录与上游公开仓库，属"作者提供自有素材"的情形：方法学在既有材料上展开，不经系统文献检索，也不编造参考文献。
+本文的实测素材全部来自本仓库的一手实测记录与上游公开仓库，属"作者提供自有素材"的情形：数据不经系统文献检索产生，也不编造参考文献。
+外部文献只用于两件事——为 2.3 确定技术坐标与缺口，为 4.2 的测量纪律提供依据；凡引述他人数字，本文标出原始出处，且不并入本文的乘积矩阵。
 所有数字都带测量口径（样本数、统计量、扣除项、机器）；凡材料中标注为推断的数字，本文保留同等标注。
 
 ---
@@ -200,12 +223,37 @@ WASI 在本探索里的作用缩减至最小：运行时模块不带 libc，
 
 ### 2.3 相关工作定位
 
-本文不引外部文献，这里只交代技术坐标系。
-放置运行时有三条路：留给宿主（perry wasm 后端的默认形态）、静态链进同一模块（perry native 后端，
+本文只交代技术坐标系，但这个坐标系由他人工作确定。放置运行时有三条路：留给宿主（perry wasm 后端的默认形态）、静态链进同一模块（perry native 后端，
 以及 wasm 侧尚未实施的"路线二"）、编成独立 wasm 模块交由多模块机制链接（本文路线三；
 复用上游运行时源码的变体见 3.2 的路线四）。
 Component Model 能给出第四种更干净的表达（用 WIT 声明 `rt` 接口），但它与本文"f64 位模式 + 线性内存槽位"的零拷贝约定冲突，
 且 WAMR 侧支持较弱，本探索未实施。坐标既定，下面把第三条路接成一条能跑的链路，路上的限制一并记下。
+
+**既有测量与本探索的距离。** 三条线各覆盖了问题的一部分，没有一条覆盖本文的形态。
+
+- **wasm 慢多少，是在有 JS 引擎的宿主上量的。**
+  Jangda 等以 SPEC CPU 在 Chrome/Firefox 上量到平均落后原生 1.55×（Chrome）与 1.45×（Firefox），
+  并做"forensic analysis"把差距归因于更多的 load/store、寄存器分配不佳与寻址模式利用不足 [1]。
+  其宿主是浏览器：被测量始终隔着 JS 引擎与一层系统调用适配。本文宿主没有任何 JS 引擎（只剩 WASI 的 `fd_write`），
+  于是"引擎因子"与"运行时语义因子"得以被分开测量——这正是第 5 章乘积分解成立的前提。
+- **服务端 wasm 的性能问题，是在运行时之间量的。**
+  WarpDiff 以"同一用例在不同 wasm 运行时上的耗时比值"作为 oracle ratio，偏离即异常，再按维留一算 deviation degree
+  定位到具体运行时；其七个性能问题全部经开发者确认 [2]。
+  这套比值型 oracle 与本文的乘积闭合校验同构，但它的被测量是运行时实现，输入是 C/C++ 产物，
+  codegen 侧的类型擦除不在其射程内。
+- **托管语言上 wasm，走的是外部依赖那一侧。**
+  WALL-E 把托管语言的运行时依赖外置链接，报告计算密集任务相对"运行时嵌套"基线平均约 647× 收益 [3]；
+  Faasm 用轻量隔离把 wasm 用于有状态 serverless [4]；
+  Mäkitalo 等在 WAMR 一侧研究把 wasm 应用划分为模块并在运行时链接，目标是内存、体积与启动时间 [5]。
+  最后一支与本文路线三最近，但其语言是 C/C++/Python/Java，不是"所有用户值一律 NaN-box f64 位模式"的 TypeScript。
+
+缺口因此可以写成一句：**TypeScript→wasm 的产物在无 JS 引擎宿主上的端到端代价，此前既没有被量过，也没有被拆成"引擎 × codegen"两个可分别干预的因子**。
+本文的 RQ2（3.2 节回答）与乘积分解（第 5 章）填的就是这一格。
+
+方法学一侧，本文的测量纪律直接受 Mytkowicz 等关于测量偏差的结果约束 [6]：该文证明链接顺序、代码对齐这类
+"看似无害的实验设置"足以让结论反向（"we may think we have a 7% slowdown when in fact we have a 8% speedup"），
+并指出 ASPLOS/PACT/PLDI/CGO 近期 133 篇含实验的论文中无一充分考虑测量偏差。
+4.2 的跨批次读数纪律与 6.1 记录的那次自我推翻，都是这条约束在本文里的具体落实。
 
 ---
 
@@ -553,6 +601,7 @@ console.log("sum = " + sum);
 ```
 
 选它有两个理由。一是**调用密集**：fib(29) 产生 1,664,079 次逻辑调用，正好把"跨语言边界的调用成本"置于显微镜下。
+它的两处热路径发射形态就是 1.2 图 1 的 (b)，全文以此为贯穿实例。
 二是**结果可校验**：两端都输出 `fib(29) = 514229`、`sum = 499999500000`，可以在计时之前先做逐字节一致性检查。
 
 六路对照共享同一份源码与同一组常量：
@@ -587,6 +636,11 @@ B 与 F 提供**独立引擎**的参照系。F 尤其重要，它刻意避开 wa
 - **样本**：稳态每目标 11 轮**交错执行**（A B C × 11），丢弃第 1 轮 warmup，取 10 个样本，报 P50 与最小/最大值；
   冷启动各 5 次取中位数。
 - **正确性先于计时**：A/B/C 输出逐字节一致性校验是 `bench.sh` 的第 2 步，排在全部计时之前。
+- **跨批次读数不得互为证据**：倍数与百分比结论只在同批、同机交错的样本内成立；不同批次之间只用于量级核对，不得相减当作效果。
+  这条不是形式条款——2026-09-19 那批 nameId 缓存的 −43% 降幅正是它要防的错误，
+  2026-09-26 的同机交错复测把它修正为 2.7%（见 6.1 与附录 A.11）。
+  本文凡作为**效果结论**的 10% 量级以下数字，均由同机交错 A/B 支撑（A.11 每版 15 样本、A.12 n=11）；
+  不满足此条件的（如 6.1 中 2026-09-19 批的 −43% 与 +7.8% 偏差）一律降级标注为当日环境读数，不作为结论。
 
 各路的计时方式随产物形态而变，这一点本身也值得写清楚：
 
@@ -598,6 +652,19 @@ B 与 F 提供**独立引擎**的参照系。F 尤其重要，它刻意避开 wa
   E′ 无状态，与 A 同为进程内 11 轮。
 - **A 路**：`bench_time` 内 `wasm_application_execute_main` 可重复执行，计时行来自进程内时钟，
   实例化开销单独输出 `INIT_MS`。
+
+**纪律的来源与三条可检查规则。** 上一节的跨批次条款，根据在外部而非本文自身：Mytkowicz 等证明实验设置里"看似无害"的维度
+（链接顺序、代码对齐）足以让优化的结论反向，并给出那句应当写在测量脚本头上的话——
+*"we may think we have a 7% slowdown when in fact we have a 8% speedup"* [6]。
+本文把这一教训具体化为三条可被核对的规则：
+
+1. **效果量级小于环境波动时，必须同机交错 A/B。** 本文 6.1 的 nameId 缓存复测与 3.2 的路线四 AOT A/B 均属此类（分别 15 样本、n=11）。
+2. **复测器具不得随结论漂移。** 6.1 的复测固定同一 `bench.wasm` 与同一 runner，只替换 rt 版本（按名扫描者为其行为等价复刻 `rt_nocache.wasm`，16,818 B，见 A.10）；
+   行为等价性由正向 5 行输出与负向 `array_new` 实名报错共同锚定，差异只落在计时读数上。
+3. **环境波动同时主导绝对值与比值时，绝对值不外推。** 本文 2026-09-26 当日 A 路 P50 落在 107–113 ms，而 2026-09-19 同一路记录为 3959 ms，
+   相差约 37×；在这个漂移量级面前，任何跨批相减都不成立。凡受此影响的数字，本文保留原值并标注批次，不改写历史。
+
+这三条使 §6.1 的那次自我推翻从"一条修正记录"升格为"方法的一部分"：读者可以据此判断本文哪些数字可迁移、哪些不可迁移。
 
 ### 4.3 结果
 
@@ -723,6 +790,8 @@ A 路 2470.678 ms ÷ C 路 1.406 ms = 1757×。
 这个数字本身没有信息量：引擎代差、编译器产出的指令形态、桥接实现效率全部混杂在一起。
 若据此说"wasm 比原生慢 1757 倍"，读者自然读成"wasm 不行"，真实情况却可能是"某个编译器的某个后端没做特化"。
 这一步要做的就是把这句话拆开——拆到每一步都能被独立证据约束。
+被拆的对象在图 1 里已经具体化：codegen 因子的主体就是图 1 (b) 那两处桥接调用（外加字符串与 console 的必经桥接与 rt 实现本身），
+引擎因子则由一份与图 1 (a) 同算法、但零 `rt.*` 导入的手写干净 wasm（5.2 的 A′/E′）单独承担。
 
 ### 5.2 乘积分解与闭合校验
 
@@ -869,7 +938,7 @@ QuickJS 是"没有桥接调用的慢解释器"，E 是"带桥接调用的机器�
 | `===` / `==` | 走桥接路径（js_strict_eq） | `Compare` 分支 |
 | 字符串操作、console | 走桥接路径（本来就必须） | `calls.rs` / `strings_json.rs` |
 
-bench.ts 热路径的 2 次/层桥接调用就是 `js_add`（加法）加 `is_truthy`（条件判定），不是全部算术。
+bench.ts 热路径的 2 次/层桥接调用就是 `js_add`（加法）加 `is_truthy`（条件判定），不是全部算术——即图 1 (b) 的那两处发射。
 而要判断这是"值模型的必然"还是"可修复的缺陷"，有三条证据：
 
 1. **类型信息存在，wasm 后端完全未用。** `crates/perry-codegen-wasm/Cargo.toml` 只依赖 perry-hir
@@ -888,6 +957,8 @@ bench.ts 热路径的 2 次/层桥接调用就是 `js_add`（加法）加 `is_tr
 裁决是：**codegen 没做类型特化与内联，属于缺陷**；同一编译器家族的原生后端已经实现同等特化，wasm 后端这块是功能缺口。
 但它不是 wasm 后端独有的 bug，而是"wasm 后端整体落后于原生后端"的状态，
 真正属于"统一设计"的只有"所有用户值一律 NaN-box f64 位模式"这一保守值模型。
+这一裁决的判据与 Jin 等的实证同类：他们考察 109 个真实性能 bug 后指出，"性能由编译器与硬件照看"这类错误认知本身即是成因之一，
+且所提供效率规则对应的 bug 无一能被当时的编译器优化掉 [7]——即"编译器会处理"不能当作免责理由。
 
 桥接实现本身的低效另做了单独量化（2026-09-19 批，非交错测量）。
 正式 rt 的 `invoke()` 原本对 10 项 `BRIDGES` 逐项 memcmp（`lib.rs` L582-586），
@@ -928,6 +999,11 @@ bench.ts 热路径的 2 次/层桥接调用就是 `js_add`（加法）加 `is_tr
 可外推的结论只剩两条——缓存直查不慢于按名扫描，且两版行为等价。
 4.3 的前后对比、5.3 的 79× → 49× 归因同属该批次口径，均以本修正为准。
 本章其余内容与 5.3 的乘积矩阵不受影响：那些数字是同批实测，闭合校验在各自批内成立。
+
+这段修正的记录方式是刻意的：它不是孤立失误的勘误，而是 4.2 第 1、3 条规则的反面证据。
+其量化理由就藏在这两个数字里——同一台机器、同一份产物、同一处改动，分批单轮读数给出 43%，同机交错给出 2.7%，
+**表观效果被放大了十几倍**。任何小于环境漂移的收益，用非交错测量都无从分辨其真伪；
+本文因此把"交错 A/B"设为 10% 量级以下结论的准入条件，而不是事后解释。
 
 ### 6.2 零上游依赖的修复：通用桥内联后处理
 
@@ -1005,7 +1081,7 @@ perry 里 number 的表示就是裸 f64 位模式（rt `encode(V::Num(n)) = n.to
 perry 自己的 codegen 对 `-`/`*`/`/` 也是**无条件**内联 `F64Sub/F64Mul/F64Div`，
 等于已经把 f64 域操作数当 number，pass 没有引入 perry 未有的假设。
 
-抽象解释在每个函数内按语句序进行，控制流合并取保守并：
+抽象解释在每个函数内按语句序进行，控制流合并取保守并。对图 1 (b) 的两处，改写规则是：
 
 ```
 js_add（nameId 8, argc 2）：
@@ -1157,7 +1233,7 @@ perry 的 number 表示即裸 f64 位模式（rt `encode(V::Num(n)) = n.to_bits(
 | `i64.ne` | 0 | 2 |
 
 fib 热路径上，`if (n < 2)` 由 `mem_call_i32(is_truthy)` 变成 `i64.ne TAG_FALSE`；
-`fib(n-1) + fib(n-2)` 与循环 `sum += i` 由 `mem_call(js_add)` 变成 `f64.add`。
+`fib(n-1) + fib(n-2)` 与循环 `sum += i` 由 `mem_call(js_add)` 变成 `f64.add`——即图 1 的 (b) 在发射点被换成了 (c)。
 剩余 6 处 `mem_call` 全是字符串拼接（`"fib(" + … + ") = " + f`、`"sum = " + sum`），
 正符合"可证 number 才内联"的设计边界。
 
@@ -1547,6 +1623,35 @@ AOT 下被消除），余下 182 个桩（168 待搬运接线 + 14 无对应）�
 - Bellard QuickJS（本地构建 `/tmp/quickjs-bellard`，`make qjs`）。
 - binaryen `wasm-opt` 123、`wasm-merge`、`wasm-dis`；
   WABT（`wasm2wat`、`wat2wasm`、`wasm-as`）。
+
+---
+
+## 参考文献
+
+本文只在 2.3（技术坐标与缺口）与 4.2（测量纪律）两处引外部文献，其余数字全部为本文一手实测。
+
+1. Abhinav Jangda, Bobby Powers, Emery D. Berger, Arjun Guha.
+   *Not So Fast: Analyzing the Performance of WebAssembly vs. Native Code*.
+   USENIX ATC 2019, pp. 107–119. <https://www.usenix.org/conference/atc19/presentation/jangda>
+2. Shuyao Jiang, Ruiying Zeng, Zihao Rao, Jiazhen Gu, Yangfan Zhou, Michael R. Lyu.
+   *Revealing Performance Issues in Server-side WebAssembly Runtimes via Differential Testing* (WarpDiff).
+   IEEE/ACM ASE 2023. <https://arxiv.org/abs/2309.12167> · DOI 10.1109/ASE56229.2023.00088
+3. Shuyao Jiang, Ruiying Zeng, Yangfan Zhou, Michael R. Lyu.
+   *Bringing Managed Language Support to WebAssembly with External Library Linking* (WALL-E).
+   Proc. ACM Softw. Eng.（FSE 2026）. <https://arxiv.org/abs/2606.21919>
+4. Simon Shillaker, Peter Pietzuch.
+   *Faasm: Lightweight Isolation for Efficient Stateful Serverless Computing*.
+   USENIX ATC 2020. <https://www.usenix.org/conference/atc20/presentation/shillaker>
+5. Niko Mäkitalo et al.
+   *Bringing WebAssembly up to speed with dynamic linking*.
+   ACM SAC 2021. <https://dl.acm.org/doi/10.1145/3412841.3442045>
+   （本文仅引其摘要所述目标：把 wasm 应用划分为模块并在运行时链接，以降低内存、体积与启动时间；未取全文，不作数字引用。）
+6. Todd Mytkowicz, Amer Diwan, Matthias Hauswirth, Peter F. Sweeney.
+   *Producing Wrong Data Without Doing Anything Obviously Wrong!*.
+   ASPLOS 2009. <https://dl.acm.org/doi/10.1145/1508284.1508275>
+7. Guoliang Jin, Linhai Song, Xiaoming Shi, Joel Scherpelz, Shan Lu.
+   *Understanding and Detecting Real-World Performance Bugs*.
+   PLDI 2012. <https://pages.cs.wisc.edu/~shanlu/paper/pldi118-jin.pdf>
 
 ---
 
